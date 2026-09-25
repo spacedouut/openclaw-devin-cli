@@ -56,8 +56,11 @@ function pluginConfig(context?: CliBackendNormalizeConfigContext): DevinCliPlugi
 }
 
 /** Mirror the bundled claude-cli adapter: full-exec OpenClaw runs get the CLI's
- * own "approve everything" mode; other runs get a mid-level default so edits
- * inside the agent workspace still work without interactive approval. */
+ * own "approve everything" mode; other runs default to `smart`, which
+ * auto-runs actions a fast model judges safe. `accept-edits` is unsuitable as a
+ * headless default: it sends `exec` to interactive approval, which
+ * auto-rejects when there is no TTY — the model's turn then ends with no reply
+ * text and OpenClaw reports "CLI backend returned an empty response". */
 function resolvePermissionMode(context?: CliBackendNormalizeConfigContext): string {
   const agentExec = context?.agentId
     ? resolveAgentConfig(context?.config ?? {}, context.agentId)?.tools?.exec
@@ -69,7 +72,7 @@ function resolvePermissionMode(context?: CliBackendNormalizeConfigContext): stri
       security: exec?.security ?? "full",
       ask: exec?.ask ?? "off",
     }).mode === "full";
-  return pluginConfig(context).permissionMode ?? (execFull ? "dangerous" : "accept-edits");
+  return pluginConfig(context).permissionMode ?? (execFull ? "dangerous" : "smart");
 }
 
 function withPermissionMode(args: string[] | undefined, mode: string): string[] {

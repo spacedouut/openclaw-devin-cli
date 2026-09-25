@@ -67,7 +67,7 @@ openclaw plugins enable devin-cli --accept-capabilities
       "devin-cli": {
         "config": {
           // "command": "devin",            // binary name or absolute path
-          // "permissionMode": "accept-edits", // auto | accept-edits | smart | dangerous
+          // "permissionMode": "smart",     // auto | accept-edits | smart | dangerous
           // "modelAliases": { "max": "swe-2-max" } // custom short ids -> devin --model ids
         }
       }
@@ -78,8 +78,11 @@ openclaw plugins enable devin-cli --accept-capabilities
 
 `permissionMode` maps to `devin --permission-mode`. When unset, the plugin
 mirrors OpenClaw's own exec policy: a `full` exec mode grants Devin
-`dangerous` (bypass all approvals); anything else defaults to `accept-edits`
-so edits inside the agent workspace proceed without interactive prompts.
+`dangerous` (bypass all approvals); anything else defaults to `smart`, which
+auto-runs actions a fast model judges safe. Do not use `accept-edits` as a
+headless default: it sends `exec` to interactive approval, which auto-rejects
+with no TTY — the turn ends with no reply text and OpenClaw reports "CLI
+backend returned an empty response".
 Side-question executions are forced to `auto` regardless.
 
 ## Usage
