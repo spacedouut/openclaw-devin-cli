@@ -38,6 +38,9 @@ const DEVIN_CLIENT_META = {
   "cognition.ai/permissionPrompts": true,
 };
 
+// Devin tailors its system prompt to the ACP client identity; present as its own CLI client.
+const DEVIN_CLIENT_VERSION = "0.4.2";
+
 const ACP_MODES = { dangerous: "bypass", smart: "smart", "accept-edits": "accept-edits", auto: "ask" };
 
 function parseArgs(argv) {
@@ -166,7 +169,8 @@ async function main() {
 
   const child = spawn(DEVIN_COMMAND, ["acp", ...(opts.model ? ["--model", opts.model] : [])], {
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
+    // `devin -p` enables shell-first file-op guidance; ACP only honours it via env.
+    env: { DEVIN_PREFER_EXEC_TOOL: "true", ...process.env, NO_COLOR: "1", TERM: "dumb" },
   });
 
   let stderr = "";
@@ -310,7 +314,7 @@ async function main() {
         auth: { terminal: false },
         _meta: DEVIN_CLIENT_META,
       },
-      clientInfo: { name: "openclaw-devin-cli", version: "0.4.1" },
+      clientInfo: { name: "devin-cli", version: DEVIN_CLIENT_VERSION },
     });
 
     const cwd = process.cwd();
