@@ -1,0 +1,38 @@
+{
+  "name": "openclaw-devin-cli",
+  "version": "0.1.0",
+  "description": "OpenClaw CLI backend plugin for Cognition Devin CLI",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "devin-openclaw-bridge": "./bin/devin-openclaw-bridge.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "src/",
+    "openclaw.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.9.0"
+  },
+  "devDependencies": {
+    "openclaw": "^2026.9.6",
+    "typescript": "^5.9.0"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"],
+    "compat": {
+      "pluginApi": ">=2026.9.0",
+      "minGatewayVersion": "2026.9.0"
+    },
+    "build": {
+      "openclawVersion": "2026.9.6",
+      "pluginSdkVersion": "2026.9.6"
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "id": "devin-cli",
+  "name": "Devin CLI",
+  "description": "Run Cognition's Devin CLI as an OpenClaw inference backend",
+  "categories": ["agent-runtimes"],
+  "cliBackends": ["devin-cli"],
+  "setup": {
+    "cliBackends": ["devin-cli"],
+    "requiresRuntime": false
+  },
+  "activation": {
+    "onStartup": false
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "devin binary name or absolute path (default: 'devin' resolved on PATH)"
+      },
+      "permissionMode": {
+        "type": "string",
+        "enum": ["auto", "accept-edits", "smart", "dangerous"],
+        "description": "Devin CLI --permission-mode. Default: 'accept-edits'; 'dangerous' when OpenClaw exec policy is full."
+      }
+    }
+  }
+}
