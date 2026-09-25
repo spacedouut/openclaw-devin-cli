@@ -30,16 +30,23 @@ Client Protocol server (JSON-RPC over stdio). Per turn it:
    lifecycle updates, and usage. `session/request_permission` is answered by
    the bridge (allow, except in `ask` mode), so tools never hang on a missing
    TTY.
-4. Emits exactly one JSON line:
+4. Streams the turn to stdout as JSONL in Gemini CLI's `stream-json` shape
+   (`jsonlDialect: "gemini-stream-json"`), so OpenClaw shows text deltas and
+   Devin's native tool calls live:
 
-   ```json
-   {"type":"result","session_id":"…","result":"…","usage":{"input_tokens":…,"output_tokens":…}}
+   ```jsonl
+   {"type":"init","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
+   {"type":"message","role":"assistant","content":"I'll run it.","delta":true}
+   {"type":"tool_use","tool_id":"call_…","tool_name":"exec","parameters":{"title":"Ran uname","command":"uname -r"}}
+   {"type":"tool_result","tool_id":"call_…","status":"success","output":"6.8.0-1061-aws"}
+   {"type":"message","role":"assistant","content":"\n\nKernel is 6.8.0-1061-aws.","delta":true}
+   {"type":"result","status":"success","session_id":"quilt-bubbler","usage":{…}}
    ```
 
-   If Devin ends a turn without any text, `result` becomes a summary of the
-   stop reason and tool activity instead of an empty string. Cancellations,
-   refusals and ACP errors are emitted as
-   `{"type":"result","status":"error",…,"errors":[…]}`.
+   If Devin ends a turn without any text, the bridge streams a summary of the
+   stop reason and tool activity as the reply instead of leaving it empty.
+   Cancellations, refusals and ACP errors end with
+   `{"type":"result","status":"error",…}`.
 
 ## Install
 
@@ -122,8 +129,6 @@ they merge over the built-in table.
 
 ## Caveats / open questions
 
-- **No streaming to OpenClaw yet.** ACP streams chunks, but the bridge emits
-  one JSON record at the end of the turn.
 - **Auth required.** `devin` must be logged in (`devin auth login`); the
   plugin publishes it as synthetic auth (`syntheticAuthRefs` +
   `prepareSyntheticAuth`, probing `devin auth status`) so OpenClaw does not

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * devin-openclaw-bridge — drives Devin CLI over ACP (`devin acp`, JSON-RPC on
- * stdio) and emits the single JSON record an OpenClaw CLI backend expects.
+ * stdio) and streams the turn to OpenClaw as gemini-stream-json JSONL.
  *
  * `devin -p` only prints the final assistant text, so a turn that ends after a
  * tool call (or a headless permission rejection) looks like an empty success.
@@ -10,8 +10,12 @@
  *
  * argv (from OpenClaw): --oc-prompt <text> [--oc-system <text>] [-r <sessionId>]
  *                       [--model <id>] [--permission-mode <mode>] [-p]
- * stdout: ONE JSON object
- *   ok    -> {"type":"result","session_id":"...","result":"...","usage":{...}}
+ * stdout: JSONL
+ *   {"type":"init","session_id":"..."}
+ *   {"type":"message","role":"assistant","content":"<delta>","delta":true}
+ *   {"type":"tool_use","tool_id":"...","tool_name":"exec","parameters":{...}}
+ *   {"type":"tool_result","tool_id":"...","status":"success","output":"..."}
+ *   {"type":"result","status":"success","session_id":"...","usage":{...}}
  *   error -> {"type":"result","status":"error","session_id":"...","result":"...","errors":[...]}
  */
 import { spawn } from "node:child_process";
@@ -133,6 +137,13 @@ function summarizeTools(tools) {
     .join("\n");
 }
 
+
+function toolName(u, prev) {
+  return prev.name ?? u._meta?.["cognition.ai/inferenceToolName"] ?? u.kind ?? "tool";
+}
+
+const TERMINAL_TOOL_STATUS = new Set(["completed", "failed"]);
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const acpMode = opts.mode ? ACP_MODES[opts.mode] ?? opts.mode : undefined;
@@ -156,6 +167,52 @@ async function main() {
   const tools = new Map();
   let usageMeta;
 
+  const emitText = (delta) => {
+    if (!delta) return;
+    reply += delta;
+    emit({ type: "message", role: "assistant", content: delta, delta: true });
+  };
+
+  // Tool lifecycle is streamed as gemini-stream-json tool_use/tool_result
+  // records, which OpenClaw surfaces as live tool events.
+  const trackTool = (u) => {
+    const prev = tools.get(u.toolCallId) ?? {};
+    const output = u.sessionUpdate === "tool_call_update" ? textOf(u.content) : "";
+    const next = {
+      ...prev,
+      name: toolName(u, prev),
+      ...(u.title ? { title: u.title } : {}),
+      ...(u.kind ? { kind: u.kind } : {}),
+      ...(u.rawInput ? { input: u.rawInput } : {}),
+      ...(u.status ? { status: u.status } : {}),
+      ...(output ? { output } : {}),
+    };
+    tools.set(u.toolCallId, next);
+    if (!prev.started) {
+      next.started = true;
+      emit({
+        type: "tool_use",
+        tool_id: u.toolCallId,
+        tool_name: next.name,
+        parameters: { ...(next.title ? { title: next.title } : {}), ...(next.input ?? {}) },
+      });
+    }
+    if (!prev.finished && TERMINAL_TOOL_STATUS.has(next.status)) {
+      next.finished = true;
+      emitToolResult(u.toolCallId, next);
+    }
+  };
+  const emitToolResult = (id, t) => {
+    const failed = t.denied || t.status !== "completed";
+    const message = t.denied ? "permission denied" : t.output ?? "";
+    emit({
+      type: "tool_result",
+      tool_id: id,
+      status: failed ? "error" : "success",
+      ...(failed ? { error: { message: message || `tool ${t.status ?? "incomplete"}` } } : { output: message }),
+    });
+  };
+
   const client = createAcpClient(child, {
     onNotification(method, params) {
       if (method !== "session/update" || !collecting) return;
@@ -164,25 +221,19 @@ async function main() {
       switch (u.sessionUpdate) {
         case "agent_message_chunk": {
           const chunk = textOf(u.content);
-          if (chunk && breakBeforeNextChunk && reply && !reply.endsWith("\n")) reply += "\n\n";
+          if (!chunk) break;
+          if (breakBeforeNextChunk && reply && !reply.endsWith("\n\n")) {
+            emitText(reply.endsWith("\n") ? "\n" : "\n\n");
+          }
           breakBeforeNextChunk = false;
-          reply += chunk;
+          emitText(chunk);
           break;
         }
         case "tool_call":
-        case "tool_call_update": {
+        case "tool_call_update":
           breakBeforeNextChunk = true;
-          const prev = tools.get(u.toolCallId) ?? {};
-          const output = textOf(u.content);
-          tools.set(u.toolCallId, {
-            ...prev,
-            ...(u.title ? { title: u.title } : {}),
-            ...(u.kind ? { kind: u.kind } : {}),
-            ...(u.status ? { status: u.status } : {}),
-            ...(output && u.sessionUpdate === "tool_call_update" ? { output } : {}),
-          });
+          trackTool(u);
           break;
-        }
         case "usage_update":
           usageMeta = u._meta ?? usageMeta;
           break;
@@ -236,7 +287,7 @@ async function main() {
     await client.request("initialize", {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: "openclaw-devin-cli", version: "0.3.0" },
+      clientInfo: { name: "openclaw-devin-cli", version: "0.4.0" },
     });
 
     const cwd = process.cwd();
@@ -251,6 +302,7 @@ async function main() {
       const created = await client.request("session/new", { cwd, mcpServers: [] });
       sessionId = created?.sessionId;
     }
+    if (sessionId) emit({ type: "init", session_id: sessionId, model: opts.model });
     if (acpMode) {
       await client.request("session/set_mode", { sessionId, modeId: acpMode }).catch(() => undefined);
     }
@@ -269,22 +321,29 @@ async function main() {
       cache_read_input_tokens: u.cachedReadTokens ?? usageMeta?.["cognition.ai/cachedReadTokens"],
     };
     const stopReason = result?.stopReason ?? "end_turn";
-    let text = reply.trim();
+    for (const [id, t] of tools) {
+      if (t.started && !t.finished) {
+        t.finished = true;
+        emitToolResult(id, t);
+      }
+    }
 
     if (stopReason === "cancelled" || cancelled) {
       emitError("Devin turn was cancelled.", sessionId);
     } else if (stopReason === "refusal") {
-      emitError(text || "Devin refused this request.", sessionId);
+      emitError(reply.trim() || "Devin refused this request.", sessionId);
     } else {
-      if (!text) {
+      if (!reply.trim()) {
         const toolSummary = summarizeTools(tools);
-        text = toolSummary
-          ? `Devin ended the turn (${stopReason}) without a text reply. Tool activity:\n${toolSummary}`
-          : `Devin ended the turn (${stopReason}) without a text reply.`;
+        emitText(
+          toolSummary
+            ? `Devin ended the turn (${stopReason}) without a text reply. Tool activity:\n${toolSummary}`
+            : `Devin ended the turn (${stopReason}) without a text reply.`,
+        );
       } else if (stopReason === "max_tokens" || stopReason === "max_turn_requests") {
-        text += `\n\n[Devin stopped early: ${stopReason}]`;
+        emitText(`\n\n[Devin stopped early: ${stopReason}]`);
       }
-      emit({ type: "result", ...(sessionId ? { session_id: sessionId } : {}), result: text, usage });
+      emit({ type: "result", status: "success", ...(sessionId ? { session_id: sessionId } : {}), usage });
     }
   } catch (err) {
     const outcome = await Promise.race([exited, new Promise((r) => setTimeout(() => r(undefined), 200))]);

@@ -95,8 +95,11 @@ function buildDevinCliBackend() {
             command: process.execPath,
             args: [BRIDGE_PATH, "--oc-prompt", "{prompt}"],
             resumeArgs: [BRIDGE_PATH, "-r", "{sessionId}", "--oc-prompt", "{prompt}"],
-            output: "json",
-            resumeOutput: "json",
+            output: "jsonl",
+            resumeOutput: "jsonl",
+            // The bridge re-emits ACP updates in Gemini CLI's stream-json shape so
+            // OpenClaw streams text deltas and native tool events live.
+            jsonlDialect: "gemini-stream-json",
             input: "arg",
             modelArg: "--model",
             modelAliases: DEVIN_MODEL_ALIASES,
