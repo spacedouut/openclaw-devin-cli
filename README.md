@@ -48,6 +48,9 @@ OpenClaw >= 2026.9.0.
 openclaw plugins install /path/to/openclaw-devin-cli
 # or, once pushed:
 openclaw plugins install git:github.com/spacedouut/openclaw-devin-cli
+
+# if the install left it disabled, enable it explicitly:
+openclaw plugins enable devin-cli --accept-capabilities
 ```
 
 > For `git:` installs, OpenClaw runs `npm install --ignore-scripts`, so the
@@ -81,9 +84,11 @@ Side-question executions are forced to `auto` regardless.
 
 ## Usage
 
-Models are not populated from `devin models list` — OpenClaw's CLI-backend
-contract has no model catalog, and unmapped ids pass straight through to
-`devin --model`. Every real Devin model id works as-is:
+The plugin exposes a model catalog for `devin-cli`: a static manifest seed
+keeps the provider visible offline, and `dist/provider-discovery.js` (declared
+via `providerCatalogEntry`) runs `devin models list --format json` when
+discovery refreshes, mapping each family slug, family alias, and variant
+`model_uid` into catalog models.
 
 ```bash
 openclaw --model devin-cli/swe-2-max     # any model_uid / family slug / family alias
@@ -92,8 +97,10 @@ openclaw --model devin-cli/sonnet        # built-in alias -> claude-sonnet-4
 openclaw --model devin-cli/opus-4.6      # built-in alias -> claude-opus-4.6
 ```
 
-Add your own short names via `plugins.entries.devin-cli.config.modelAliases`
-in `openclaw.json` — they merge over the built-in table.
+Unmapped ids also pass straight through to `devin --model`, so refs keep
+working even for models missing from the catalog. Add your own short names
+via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json` —
+they merge over the built-in table.
 
 - **Session resume:** the bridge diffs `devin list` rows to find the new
   session id; OpenClaw then resumes that session via `devin -r <id>` on
@@ -150,8 +157,9 @@ openclaw --model devin-cli/opus "hello"
 
 | path | role |
 | --- | --- |
-| `openclaw.plugin.json` | manifest (`cliBackends: ["devin-cli"]`, config schema) |
+| `openclaw.plugin.json` | manifest (`cliBackends`, `modelCatalog`, `sessionRouteStateOwners`, config schema) |
 | `src/index.ts` | plugin entry: builds `CliBackendConfig`, permission-mode normalization |
+| `src/provider-discovery.ts` | catalog entry: `devin models list` -> model catalog, static fallback |
 | `src/sdk-shim.d.ts` | typings for untyped `openclaw/plugin-sdk/*` subpaths |
 | `bin/devin-openclaw-bridge.mjs` | runtime shim: spawn `devin`, recover session id, emit JSON |
 

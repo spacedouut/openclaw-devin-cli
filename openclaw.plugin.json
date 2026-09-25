@@ -3,7 +3,38 @@
   "name": "Devin CLI",
   "description": "Run Cognition's Devin CLI as an OpenClaw inference backend",
   "categories": ["agent-runtimes"],
+  "enabledByDefault": true,
   "cliBackends": ["devin-cli"],
+  "sessionRouteStateOwners": [
+    {
+      "id": "devin-cli",
+      "label": "Devin CLI",
+      "providerIds": ["devin-cli"],
+      "runtimeIds": ["devin-cli"],
+      "cliSessionKeys": ["devin-cli"],
+      "authProfilePrefixes": ["devin-cli:"]
+    }
+  ],
+  "providerCatalogEntry": "./dist/provider-discovery.js",
+  "modelCatalog": {
+    "providers": {
+      "devin-cli": {
+        "defaultModel": "adaptive",
+        "models": [
+          { "id": "adaptive", "name": "Adaptive", "input": ["text"] },
+          { "id": "swe-2", "name": "SWE-2", "input": ["text"] },
+          { "id": "swe-2-high", "name": "SWE-2 High", "input": ["text"], "reasoning": true },
+          { "id": "swe-2-medium", "name": "SWE-2 Medium", "input": ["text"] },
+          { "id": "swe-2-max", "name": "SWE-2 Max", "input": ["text"], "reasoning": true },
+          { "id": "claude-sonnet-4", "name": "Claude Sonnet 4", "input": ["text"], "reasoning": true },
+          { "id": "claude-opus-4.6", "name": "Claude Opus 4.6", "input": ["text"], "reasoning": true },
+          { "id": "opus", "name": "Claude Opus (alias)", "input": ["text"], "reasoning": true },
+          { "id": "codex", "name": "Codex", "input": ["text"] }
+        ]
+      }
+    },
+    "discovery": { "devin-cli": "runtime" }
+  },
   "setup": {
     "cliBackends": ["devin-cli"],
     "requiresRuntime": false

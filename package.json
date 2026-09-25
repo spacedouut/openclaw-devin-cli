@@ -1,6 +1,6 @@
 {
   "name": "openclaw-devin-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw CLI backend plugin for Cognition Devin CLI",
   "type": "module",
   "license": "MIT",
@@ -25,7 +25,9 @@
     "typescript": "^5.9.0"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"],
+    "extensions": [
+      "./dist/index.js"
+    ],
     "compat": {
       "pluginApi": ">=2026.9.0",
       "minGatewayVersion": "2026.9.0"
