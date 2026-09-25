@@ -6,6 +6,8 @@
   "enabledByDefault": true,
   "cliBackends": ["devin-cli"],
   "providers": ["devin-cli"],
+  "syntheticAuthRefs": ["devin-cli"],
+  "nonSecretAuthMarkers": ["openclaw:devin-cli-native-auth"],
   "sessionRouteStateOwners": [
     {
       "id": "devin-cli",

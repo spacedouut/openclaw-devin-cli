@@ -5,9 +5,9 @@ Cognition's [Devin CLI](https://github.com/CognitionAI/devin-cli) (`devin`) into
 OpenClaw's agent runtime, so a model ref like `devin-cli/opus` runs a turn
 through `devin -p` instead of a native API provider.
 
-Status: experimental / alpha. It registers correctly and produces valid output
-records, but it has not yet been exercised against a real authenticated
-`devin` install end-to-end (see [Testing](#testing)).
+Status: experimental / alpha, verified end-to-end on OpenClaw 2026.9.6 +
+devin-cli 3000.11.x (`openclaw agent --local -m "…" --model devin-cli/opus`
+returns a real Devin reply; see [Testing](#testing)).
 
 ## Why a bridge script?
 
@@ -91,11 +91,17 @@ discovery refreshes, mapping each family slug, family alias, and variant
 `model_uid` into catalog models.
 
 ```bash
-openclaw --model devin-cli/swe-2-max     # any model_uid / family slug / family alias
-openclaw --model devin-cli/adaptive
-openclaw --model devin-cli/sonnet        # built-in alias -> claude-sonnet-4
-openclaw --model devin-cli/opus-4.6      # built-in alias -> claude-opus-4.6
+openclaw agent --local -m "hello" --model devin-cli/swe-2-max   # any model_uid / family slug / alias
+openclaw agent --local -m "hello" --model devin-cli/adaptive
+openclaw agent --local -m "hello" --model devin-cli/sonnet      # built-in alias -> claude-sonnet-4
+openclaw agent --local -m "hello" --model devin-cli/opus-4.6    # built-in alias -> claude-opus-4.6
+# or interactively: openclaw chat, then /model devin-cli/opus
 ```
+
+> `openclaw infer model run` / `capability model run` only drives the
+> OpenAI-compatible HTTP transport — it cannot exercise CLI backends
+> (`codex` errors there for the same reason). Use `openclaw agent --local`,
+> `openclaw chat`, or the gateway agent path.
 
 Unmapped ids also pass straight through to `devin --model`, so refs keep
 working even for models missing from the catalog. Add your own short names
@@ -120,8 +126,13 @@ they merge over the built-in table.
   json` output shape (`id`/`session_id`/`sessionId` + a timestamp field) and
   on the run actually creating a session row in the current cwd. If the CLI
   changes that shape, `session_id` goes missing and every turn starts fresh.
-- **Auth required.** `devin` must be logged in (`devin auth login`);
-  unauthenticated calls surface as error payloads.
+- **Auth required.** `devin` must be logged in (`devin auth login`); the
+  plugin publishes it as synthetic auth (`syntheticAuthRefs` +
+  `prepareSyntheticAuth`, probing `devin auth status`) so OpenClaw does not
+  ask for an API key for `devin-cli`.
+- **Workspace trust.** Devin CLI refuses `-p` in untrusted directories. If a
+  run fails with "Refusing to run in an untrusted workspace", trust the dir
+  interactively or set `skip_workspace_trust` in `devin`'s config.
 - **Alternative path:** `devin acp` exposes the Agent Client Protocol — an
   OpenClaw ACP-agent backend (if one lands in the plugin SDK) would be a much
   cleaner integration than this stdout-parsing bridge.
@@ -150,7 +161,7 @@ End-to-end in OpenClaw (needs a logged-in `devin`):
 
 ```bash
 openclaw plugins install -l /path/to/openclaw-devin-cli
-openclaw --model devin-cli/opus "hello"
+openclaw agent --local -m "hello" --model devin-cli/opus
 ```
 
 ## Layout

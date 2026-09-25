@@ -7,10 +7,12 @@
  * spawn: it wraps the reply in the JSON record OpenClaw parses and recovers
  * the Devin session id so `-r <sessionId>` resume works across turns.
  */
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   definePluginEntry,
   type OpenClawPluginApi,
+  type ProviderRuntimeModel,
 } from "openclaw/plugin-sdk/plugin-entry";
 import {
   CLI_FRESH_WATCHDOG_DEFAULTS,
@@ -22,10 +24,16 @@ import {
 import { resolveExecModePolicy } from "openclaw/plugin-sdk/exec-approvals-runtime";
 import { resolveAgentConfig } from "openclaw/plugin-sdk/agent-scope-runtime";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
+import {
+  devinCliCatalog,
+  devinCommand,
+  staticProvider,
+} from "./provider-discovery.js";
 
 // The real `CliBackendPlugin` type is only re-exported from plugin-entry under
 // a minified alias; deriving it from the typed API signature is more stable.
 type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
+type ProviderPlugin = Parameters<OpenClawPluginApi["registerProvider"]>[0];
 
 const BACKEND_ID = "devin-cli";
 const PERMISSION_MODE_ARG = "--permission-mode";
@@ -153,11 +161,79 @@ function buildDevinCliBackend(): CliBackendPlugin {
   };
 }
 
+/**
+ * Runtime provider registration. The CLI backend contract only describes how
+ * to spawn `devin`; resolving `devin-cli/<model>` refs and feeding the model
+ * pickers happen through this ProviderPlugin (same split as Google's
+ * `google-gemini-cli`): `staticCatalog`/`catalog` fill `models list`, and
+ * `resolveDynamicModel` resolves any model id — Devin CLI owns id validation
+ * and accepts arbitrary `--model` values, so resolution passes ids through.
+ */
+function buildDevinCliProvider(): ProviderPlugin {
+  return {
+    id: BACKEND_ID,
+    label: "Devin CLI",
+    docsPath: "/providers/models",
+    envVars: [],
+    auth: [],
+    staticCatalog: {
+      order: "simple",
+      run: async () => ({ providers: { [BACKEND_ID]: staticProvider() } }),
+    },
+    catalog: {
+      order: "simple",
+      run: devinCliCatalog,
+    },
+    // Devin CLI owns its own login (devin auth login); surface it as the
+    // provider's credential so runs don't demand a models.providers API key.
+    prepareSyntheticAuth: async ({ provider, env = process.env, signal }) => {
+      if (provider?.toLowerCase() !== BACKEND_ID) {
+        return undefined;
+      }
+      signal?.throwIfAborted();
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(
+          devinCommand({ env }),
+          ["auth", "status"],
+          { timeout: 15_000, env: { ...env, CI: "1", NO_COLOR: "1" }, signal },
+          (error, out) => (error ? reject(error) : resolve(out)),
+        );
+      }).catch(() => "");
+      signal?.throwIfAborted();
+      return stdout.includes("Logged in")
+        ? { apiKey: "openclaw:devin-cli-native-auth", source: "Devin CLI native auth", mode: "oauth" as const }
+        : undefined;
+    },
+    resolveDynamicModel: (ctx): ProviderRuntimeModel | undefined => {
+      const modelId = ctx.modelId.trim();
+      if (!modelId) {
+        return undefined;
+      }
+      return {
+        id: modelId,
+        name: modelId,
+        provider: BACKEND_ID,
+        // api/baseUrl are inert for CLI providers: execution routes through the
+        // registered devin-cli backend, not HTTP transport. Same default shape
+        // bundled claude-cli catalog rows resolve to.
+        api: "openai-responses",
+        baseUrl: "",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 262_000,
+        maxTokens: 128_000,
+      };
+    },
+  };
+}
+
 export default definePluginEntry({
   id: BACKEND_ID,
   name: "Devin CLI",
   description: "Run Cognition's Devin CLI through OpenClaw",
   register(api) {
     api.registerCliBackend(buildDevinCliBackend());
+    api.registerProvider(buildDevinCliProvider());
   },
 });

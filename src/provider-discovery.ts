@@ -1,36 +1,42 @@
 /**
- * Provider-catalog entry for `devin-cli` (manifest `providerCatalogEntry`).
+ * Shared model-catalog helpers for `devin-cli`.
  *
- * CLI backends have no model-catalog hook, so OpenClaw's model pickers get
- * their `devin-cli/...` list from this ProviderPlugin-shaped module instead:
+ * Used by both the manifest `providerCatalogEntry` module and the runtime
+ * `api.registerProvider` registration:
  *
- * - `staticCatalog` returns a small offline seed so the provider is always
+ * - `staticProvider` returns an offline seed so the provider is always
  *   visible in pickers.
- * - `catalog` (the live hook) shells out to `devin models list --format json`
- *   and maps families/variants into catalog models, falling back to the
- *   static seed when the CLI is missing, unauthenticated, or slow.
+ * - `listDevinModels` shells out to `devin models list --format json`
+ *   and maps families/variants into catalog models.
  */
 import { execFile } from "node:child_process";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 
 const BACKEND_ID = "devin-cli";
 
-type CatalogModel = {
+const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const DEFAULT_MAX_TOKENS = 128_000;
+const DEFAULT_CONTEXT_WINDOW = 262_000;
+
+/** Shape the runtime expects inside ProviderCatalogResult.providers[*].models —
+ * ModelDefinitionConfig: id plus required reasoning/input/cost/maxTokens. */
+export type CatalogModel = {
   id: string;
-  name?: string;
-  input?: string[];
-  reasoning?: boolean;
+  name: string;
+  reasoning: boolean;
+  input: ("text" | "image" | "video" | "audio")[];
+  cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
   contextWindow?: number;
-  maxTokens?: number;
-  status?: "available" | "preview" | "deprecated" | "disabled";
+  maxTokens: number;
 };
 
-type CatalogProvider = {
+export type CatalogProvider = {
+  baseUrl: string;
   defaultModel?: string;
   models: CatalogModel[];
 };
 
-type ProviderCatalogContext = {
+export type ProviderCatalogContext = {
   config?: unknown;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -54,22 +60,60 @@ type DevinModelFamily = {
 /** Offline seed so `devin-cli` is visible in model pickers before auth.
  * Every id is a value `devin --model` accepts natively. */
 const STATIC_MODELS: CatalogModel[] = [
-  { id: "adaptive", name: "Adaptive", input: ["text"] },
-  { id: "swe-2", name: "SWE-2", input: ["text"] },
-  { id: "swe-2-high", name: "SWE-2 High", input: ["text"], reasoning: true },
-  { id: "swe-2-medium", name: "SWE-2 Medium", input: ["text"] },
-  { id: "swe-2-max", name: "SWE-2 Max", input: ["text"], reasoning: true },
-  { id: "claude-sonnet-4", name: "Claude Sonnet 4", input: ["text"], reasoning: true },
-  { id: "claude-opus-4.6", name: "Claude Opus 4.6", input: ["text"], reasoning: true },
-  { id: "opus", name: "Claude Opus (alias)", input: ["text"], reasoning: true },
-  { id: "codex", name: "Codex", input: ["text"] },
+  { id: "adaptive", name: "Adaptive", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
+  { id: "swe-2", name: "SWE-2", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
+  {
+    id: "swe-2-high",
+    name: "SWE-2 High",
+    reasoning: true,
+    input: ["text"],
+    cost: ZERO_COST,
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxTokens: DEFAULT_MAX_TOKENS,
+  },
+  {
+    id: "swe-2-medium",
+    name: "SWE-2 Medium",
+    reasoning: false,
+    input: ["text"],
+    cost: ZERO_COST,
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxTokens: DEFAULT_MAX_TOKENS,
+  },
+  {
+    id: "swe-2-max",
+    name: "SWE-2 Max",
+    reasoning: true,
+    input: ["text"],
+    cost: ZERO_COST,
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
+    maxTokens: DEFAULT_MAX_TOKENS,
+  },
+  {
+    id: "claude-sonnet-4",
+    name: "Claude Sonnet 4",
+    reasoning: true,
+    input: ["text"],
+    cost: ZERO_COST,
+    maxTokens: DEFAULT_MAX_TOKENS,
+  },
+  {
+    id: "claude-opus-4.6",
+    name: "Claude Opus 4.6",
+    reasoning: true,
+    input: ["text"],
+    cost: ZERO_COST,
+    maxTokens: DEFAULT_MAX_TOKENS,
+  },
+  { id: "opus", name: "Claude Opus (alias)", reasoning: true, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
+  { id: "codex", name: "Codex", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
 ];
 
-function staticProvider(): CatalogProvider {
-  return { defaultModel: "adaptive", models: STATIC_MODELS };
+export function staticProvider(): CatalogProvider {
+  return { baseUrl: "", defaultModel: "adaptive", models: STATIC_MODELS };
 }
 
-function devinCommand(ctx: ProviderCatalogContext): string {
+export function devinCommand(ctx: ProviderCatalogContext): string {
   const raw = resolvePluginConfigObject(ctx.config as never, BACKEND_ID);
   const command = (raw as { command?: unknown } | null | undefined)?.command;
   return typeof command === "string" && command.trim() ? command.trim() : "devin";
@@ -89,30 +133,43 @@ function modelsFromFamilies(families: DevinModelFamily[]): CatalogModel[] {
   for (const family of families) {
     push(
       family.slug
-        ? { id: family.slug, name: family.family_label ?? family.slug, input: ["text"] }
+        ? {
+            id: family.slug,
+            name: family.family_label ?? family.slug,
+            reasoning: false,
+            input: ["text"],
+            cost: ZERO_COST,
+            maxTokens: DEFAULT_MAX_TOKENS,
+          }
         : undefined,
     );
     for (const alias of family.aliases ?? []) {
-      push({ id: alias, name: family.family_label ?? alias, input: ["text"] });
+      push({
+        id: alias,
+        name: family.family_label ?? alias,
+        reasoning: false,
+        input: ["text"],
+        cost: ZERO_COST,
+        maxTokens: DEFAULT_MAX_TOKENS,
+      });
     }
     for (const variant of family.variants ?? []) {
       if (!variant.model_uid) continue;
       push({
         id: variant.model_uid,
         name: variant.label ?? variant.model_uid,
+        reasoning: false,
         input: ["text"],
-        ...(variant.max_context_tokens
-          ? { contextWindow: variant.max_context_tokens }
-          : {}),
-        ...(variant.max_output_tokens ? { maxTokens: variant.max_output_tokens } : {}),
-        ...(variant.is_beta ? { status: "preview" } : {}),
+        cost: ZERO_COST,
+        contextWindow: variant.max_context_tokens ?? DEFAULT_CONTEXT_WINDOW,
+        maxTokens: variant.max_output_tokens ?? DEFAULT_MAX_TOKENS,
       });
     }
   }
   return models;
 }
 
-async function listDevinModels(ctx: ProviderCatalogContext): Promise<CatalogModel[]> {
+export async function listDevinModels(ctx: ProviderCatalogContext): Promise<CatalogModel[]> {
   const output = await new Promise<string>((resolve, reject) => {
     execFile(
       devinCommand(ctx),
@@ -130,6 +187,25 @@ async function listDevinModels(ctx: ProviderCatalogContext): Promise<CatalogMode
   return modelsFromFamilies(parsed.families ?? []);
 }
 
+/** Shared catalog hook body: live `devin models list`, static seed fallback. */
+export async function devinCliCatalog(ctx: ProviderCatalogContext): Promise<{
+  providers: Record<string, CatalogProvider>;
+}> {
+  try {
+    const models = await listDevinModels(ctx);
+    if (models.length > 0) {
+      return {
+        providers: {
+          [BACKEND_ID]: { baseUrl: "", defaultModel: "adaptive", models },
+        },
+      };
+    }
+  } catch {
+    // devin missing/unauthenticated/slow — static seed keeps the provider visible.
+  }
+  return { providers: { [BACKEND_ID]: staticProvider() } };
+}
+
 const devinCliProviderDiscovery = {
   id: BACKEND_ID,
   label: "Devin CLI",
@@ -141,17 +217,7 @@ const devinCliProviderDiscovery = {
   },
   catalog: {
     order: "simple" as const,
-    run: async (ctx: ProviderCatalogContext) => {
-      try {
-        const models = await listDevinModels(ctx);
-        if (models.length > 0) {
-          return { providers: { [BACKEND_ID]: { defaultModel: "adaptive", models } } };
-        }
-      } catch {
-        // devin missing/unauthenticated/slow — static seed keeps the provider visible.
-      }
-      return { providers: { [BACKEND_ID]: staticProvider() } };
-    },
+    run: devinCliCatalog,
   },
 };
 
