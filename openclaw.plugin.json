@@ -5,6 +5,7 @@
   "categories": ["agent-runtimes"],
   "enabledByDefault": true,
   "cliBackends": ["devin-cli"],
+  "providers": ["devin-cli"],
   "sessionRouteStateOwners": [
     {
       "id": "devin-cli",
