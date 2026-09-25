@@ -1,11 +1,10 @@
 /**
- * openclaw-devin-cli — registers Cognition's Devin CLI (`devin -p`) as an
- * OpenClaw CLI backend. Model refs look like `devin-cli/opus`.
+ * openclaw-devin-cli — registers Cognition's Devin CLI as an OpenClaw CLI
+ * backend. Model refs look like `devin-cli/opus`.
  *
- * Devin CLI prints plain text and owns local login + session state, so a
- * bundled bridge script (bin/devin-openclaw-bridge.mjs) performs the actual
- * spawn: it wraps the reply in the JSON record OpenClaw parses and recovers
- * the Devin session id so `-r <sessionId>` resume works across turns.
+ * A bundled bridge (bin/devin-openclaw-bridge.mjs) drives `devin acp` over the
+ * Agent Client Protocol and wraps the turn in the JSON record OpenClaw parses,
+ * carrying Devin's native session id so `-r <sessionId>` resume works.
  */
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -55,12 +54,10 @@ function pluginConfig(context?: CliBackendNormalizeConfigContext): DevinCliPlugi
   return (raw ?? {}) as DevinCliPluginConfig;
 }
 
-/** Mirror the bundled claude-cli adapter: full-exec OpenClaw runs get the CLI's
- * own "approve everything" mode; other runs default to `smart`, which
- * auto-runs actions a fast model judges safe. `accept-edits` is unsuitable as a
- * headless default: it sends `exec` to interactive approval, which
- * auto-rejects when there is no TTY — the model's turn then ends with no reply
- * text and OpenClaw reports "CLI backend returned an empty response". */
+/** Mirror the bundled claude-cli adapter: full-exec OpenClaw runs get Devin's
+ * "approve everything" mode; other runs default to `smart`, which auto-runs
+ * actions a fast model judges safe. The bridge maps these onto ACP session
+ * modes and answers any remaining ACP permission requests itself. */
 function resolvePermissionMode(context?: CliBackendNormalizeConfigContext): string {
   const agentExec = context?.agentId
     ? resolveAgentConfig(context?.config ?? {}, context.agentId)?.tools?.exec
@@ -139,15 +136,15 @@ function buildDevinCliBackend(): CliBackendPlugin {
     config: {
       // Spawn the bridge with the same runtime that loaded this plugin (node or bun).
       command: process.execPath,
-      args: [BRIDGE_PATH, "--oc-prompt", "{prompt}", "-p"],
-      resumeArgs: [BRIDGE_PATH, "-r", "{sessionId}", "--oc-prompt", "{prompt}", "-p"],
+      args: [BRIDGE_PATH, "--oc-prompt", "{prompt}"],
+      resumeArgs: [BRIDGE_PATH, "-r", "{sessionId}", "--oc-prompt", "{prompt}"],
       output: "json",
       resumeOutput: "json",
       input: "arg",
       modelArg: "--model",
       modelAliases: DEVIN_MODEL_ALIASES,
       // OpenClaw's system prompt rides into the prompt body via a bridge flag:
-      // `devin -p` has no native system-prompt argument.
+      // Devin ACP sessions have no system-prompt field.
       systemPromptArg: "--oc-system",
       systemPromptWhen: "first",
       systemPromptMode: "append",

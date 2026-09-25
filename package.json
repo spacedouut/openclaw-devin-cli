@@ -1,6 +1,6 @@
 {
   "name": "openclaw-devin-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenClaw CLI backend plugin for Cognition Devin CLI",
   "type": "module",
   "license": "MIT",
