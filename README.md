@@ -64,7 +64,8 @@ openclaw plugins install git:github.com/spacedouut/openclaw-devin-cli
       "devin-cli": {
         "config": {
           // "command": "devin",            // binary name or absolute path
-          // "permissionMode": "accept-edits" // auto | accept-edits | smart | dangerous
+          // "permissionMode": "accept-edits", // auto | accept-edits | smart | dangerous
+          // "modelAliases": { "max": "swe-2-max" } // custom short ids -> devin --model ids
         }
       }
     }
@@ -80,11 +81,19 @@ Side-question executions are forced to `auto` regardless.
 
 ## Usage
 
+Models are not populated from `devin models list` — OpenClaw's CLI-backend
+contract has no model catalog, and unmapped ids pass straight through to
+`devin --model`. Every real Devin model id works as-is:
+
 ```bash
-openclaw --model devin-cli/opus        # modelAliases: opus -> claude-opus-4.6
-openclaw --model devin-cli/sonnet      # sonnet -> claude-sonnet-4
-openclaw --model devin-cli/<model-id>  # anything else passed to devin --model
+openclaw --model devin-cli/swe-2-max     # any model_uid / family slug / family alias
+openclaw --model devin-cli/adaptive
+openclaw --model devin-cli/sonnet        # built-in alias -> claude-sonnet-4
+openclaw --model devin-cli/opus-4.6      # built-in alias -> claude-opus-4.6
 ```
+
+Add your own short names via `plugins.entries.devin-cli.config.modelAliases`
+in `openclaw.json` — they merge over the built-in table.
 
 - **Session resume:** the bridge diffs `devin list` rows to find the new
   session id; OpenClaw then resumes that session via `devin -r <id>` on

@@ -23,6 +23,11 @@
         "type": "string",
         "enum": ["auto", "accept-edits", "smart", "dangerous"],
         "description": "Devin CLI --permission-mode. Default: 'accept-edits'; 'dangerous' when OpenClaw exec policy is full."
+      },
+      "modelAliases": {
+        "type": "object",
+        "additionalProperties": { "type": "string" },
+        "description": "Extra OpenClaw model ids mapped to `devin --model` ids (merged over built-in aliases)."
       }
     }
   }

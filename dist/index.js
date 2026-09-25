@@ -48,12 +48,16 @@ function withPermissionMode(args, mode) {
 }
 function normalizeDevinBackendConfig(config, context) {
     const command = pluginConfig(context).command;
+    const modelAliases = pluginConfig(context).modelAliases;
     return {
         ...config,
         args: withPermissionMode(config.args, resolvePermissionMode(context)),
         resumeArgs: withPermissionMode(config.resumeArgs, resolvePermissionMode(context)),
         ...(command
             ? { env: { ...(config.env ?? {}), DEVIN_OPENCLAW_COMMAND: command } }
+            : {}),
+        ...(modelAliases
+            ? { modelAliases: { ...(config.modelAliases ?? {}), ...modelAliases } }
             : {}),
     };
 }

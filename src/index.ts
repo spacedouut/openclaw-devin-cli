@@ -38,6 +38,8 @@ type DevinCliPluginConfig = {
   command?: string;
   /** Devin CLI --permission-mode override. */
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
+  /** Extra/override OpenClaw model ids -> `devin --model` ids. */
+  modelAliases?: Record<string, string>;
 };
 
 function pluginConfig(context?: CliBackendNormalizeConfigContext): DevinCliPluginConfig {
@@ -78,12 +80,16 @@ function normalizeDevinBackendConfig(
   context?: CliBackendNormalizeConfigContext,
 ): CliBackendConfig {
   const command = pluginConfig(context).command;
+  const modelAliases = pluginConfig(context).modelAliases;
   return {
     ...config,
     args: withPermissionMode(config.args, resolvePermissionMode(context)),
     resumeArgs: withPermissionMode(config.resumeArgs, resolvePermissionMode(context)),
     ...(command
       ? { env: { ...(config.env ?? {}), DEVIN_OPENCLAW_COMMAND: command } }
+      : {}),
+    ...(modelAliases
+      ? { modelAliases: { ...(config.modelAliases ?? {}), ...modelAliases } }
       : {}),
   };
 }
