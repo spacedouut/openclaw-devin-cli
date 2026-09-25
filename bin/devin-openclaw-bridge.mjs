@@ -24,6 +24,20 @@ const DEVIN_COMMAND = process.env.DEVIN_OPENCLAW_COMMAND || "devin";
 const STDERR_TAIL = 4000;
 
 /** Devin CLI `--permission-mode` values -> ACP session mode ids. */
+// Capabilities `devin -p` advertises to its own `devin acp` child, minus UI-only ones
+// (partial tool-input streaming, browser preview, clipboard, chains).
+const DEVIN_CLIENT_META = {
+  "cognition.ai/messageGrouping": true,
+  "cognition.ai/groupedSessionConfigOptions": true,
+  "cognition.ai/clientProvidedModels": true,
+  "cognition.ai/stopOnReject": true,
+  "cognition.ai/subagentControl": true,
+  "cognition.ai/subagentSupport": true,
+  "cognition.ai/windsurfConfigBridge": true,
+  "cognition.ai/workspaceDirCommands": true,
+  "cognition.ai/permissionPrompts": true,
+};
+
 const ACP_MODES = { dangerous: "bypass", smart: "smart", "accept-edits": "accept-edits", auto: "ask" };
 
 function parseArgs(argv) {
@@ -188,7 +202,9 @@ async function main() {
       ...(output ? { output } : {}),
     };
     tools.set(u.toolCallId, next);
-    if (!prev.started) {
+    const ready =
+      Boolean(u.status) || (u.sessionUpdate === "tool_call" && next.input && typeof next.input === "object");
+    if (!prev.started && ready) {
       next.started = true;
       emit({
         type: "tool_use",
@@ -197,7 +213,7 @@ async function main() {
         parameters: { ...(next.title ? { title: next.title } : {}), ...(next.input ?? {}) },
       });
     }
-    if (!prev.finished && TERMINAL_TOOL_STATUS.has(next.status)) {
+    if (next.started && !prev.finished && TERMINAL_TOOL_STATUS.has(next.status)) {
       next.finished = true;
       emitToolResult(u.toolCallId, next);
     }
@@ -220,6 +236,8 @@ async function main() {
       if (!u) return;
       switch (u.sessionUpdate) {
         case "agent_message_chunk": {
+          const parent = u._meta?.["cognition.ai/subagent_context"]?.parentAgentId;
+          if (parent && parent !== "root") break;
           const chunk = textOf(u.content);
           if (!chunk) break;
           if (breakBeforeNextChunk && reply && !reply.endsWith("\n\n")) {
@@ -286,8 +304,13 @@ async function main() {
   try {
     await client.request("initialize", {
       protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-      clientInfo: { name: "openclaw-devin-cli", version: "0.4.0" },
+      clientCapabilities: {
+        fs: { readTextFile: false, writeTextFile: false },
+        terminal: false,
+        auth: { terminal: false },
+        _meta: DEVIN_CLIENT_META,
+      },
+      clientInfo: { name: "openclaw-devin-cli", version: "0.4.1" },
     });
 
     const cwd = process.cwd();
@@ -299,7 +322,11 @@ async function main() {
           .catch(() => undefined);
       }
     } else {
-      const created = await client.request("session/new", { cwd, mcpServers: [] });
+      const created = await client.request("session/new", {
+        cwd,
+        mcpServers: [],
+        _meta: { "cognition.ai/promptForEdits": true },
+      });
       sessionId = created?.sessionId;
     }
     if (sessionId) emit({ type: "init", session_id: sessionId, model: opts.model });
@@ -361,6 +388,14 @@ async function main() {
       emitError(`devin acp failed: ${err?.acp?.message ?? err?.message ?? err}`, sessionId, tail ? [tail] : []);
     }
   } finally {
+    if (sessionId) {
+      await Promise.race([
+        client
+          .request("_cognition.ai/session/end", { sessionId, reason: "other", reloading: false })
+          .catch(() => undefined),
+        new Promise((r) => setTimeout(r, 2000).unref()),
+      ]);
+    }
     finish();
   }
 }
