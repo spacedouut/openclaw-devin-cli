@@ -81,14 +81,14 @@
               "type": "object",
               "propertyNames": { "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
               "minProperties": 1,
-              "additionalProperties": { "type": "string" }
+              "additionalProperties": { "type": "string", "pattern": "\\S" }
             },
             "fastLevels": {
               "type": "object",
               "propertyNames": { "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
               "additionalProperties": { "type": "string" }
             },
-            "base": { "type": "string", "minLength": 1, "description": "Variant used when no thinking level is set or the level is unmapped." },
+            "base": { "type": "string", "minLength": 1, "pattern": "\\S", "description": "Variant used when no thinking level is set or the level is unmapped." },
             "defaultLevel": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
             "aliases": { "type": "array", "items": { "type": "string" } }
           }

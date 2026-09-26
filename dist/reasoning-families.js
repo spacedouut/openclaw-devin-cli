@@ -113,7 +113,8 @@ export function mergeConfiguredFamilies(auto, configured) {
     const merged = { ...auto };
     for (const [id, raw] of Object.entries(configured ?? {})) {
         const levels = levelMapFromConfig(raw.levels);
-        if (Object.keys(levels).length === 0 && !raw.base)
+        const base = raw.base?.trim();
+        if (Object.keys(levels).length === 0 && !base)
             continue;
         const fastLevels = levelMapFromConfig(raw.fastLevels);
         const key = id.toLowerCase().replace(/\./g, "-");
@@ -121,7 +122,7 @@ export function mergeConfiguredFamilies(auto, configured) {
             label: raw.label ?? auto[key]?.label ?? id,
             levels,
             ...(Object.keys(fastLevels).length > 0 ? { fastLevels } : {}),
-            ...(raw.base ? { base: raw.base } : {}),
+            ...(base ? { base } : {}),
             ...(isReasoningLevel(raw.defaultLevel) ? { defaultLevel: raw.defaultLevel } : {}),
             ...(raw.aliases ? { aliases: raw.aliases.map((a) => a.toLowerCase()) } : {}),
             contextWindow: auto[key]?.contextWindow,
