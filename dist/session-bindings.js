@@ -2,7 +2,7 @@
  * Plugin-owned map from OpenClaw session ids to native Devin ACP sessions.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 const LOCK_TIMEOUT_MS = 5_000;
 const LOCK_STALE_MS = 2_000;
@@ -45,10 +45,9 @@ export class DevinSessionBindings {
         }
     }
     isAbandoned(owner, mtimeMs) {
-        if (Date.now() - mtimeMs > LOCK_STALE_MS)
-            return true;
-        if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0)
-            return false;
+        if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) {
+            return Date.now() - mtimeMs > LOCK_STALE_MS;
+        }
         try {
             process.kill(owner.pid, 0);
             return false;
@@ -58,22 +57,45 @@ export class DevinSessionBindings {
         }
     }
     reclaim(observedToken) {
-        const claimed = `${this.lock}.${randomUUID()}.stale`;
+        const guard = `${this.lock}.reclaim`;
         try {
-            renameSync(this.lock, claimed);
-        }
-        catch {
-            return;
-        }
-        if (this.readLockOwner(claimed)?.token !== observedToken) {
+            const fd = openSync(guard, "wx", 0o600);
             try {
-                linkSync(claimed, this.lock);
+                writeSync(fd, `${randomUUID()} ${process.pid}`);
+            }
+            finally {
+                closeSync(fd);
+            }
+        }
+        catch (error) {
+            if (error.code !== "EEXIST")
+                throw error;
+            try {
+                if (this.isAbandoned(this.readLockOwner(guard), statSync(guard).mtimeMs))
+                    rmSync(guard, { force: true });
             }
             catch {
-                // a new owner already holds the lock
+                // guard released between attempts
             }
+            return;
         }
-        rmSync(claimed, { force: true });
+        try {
+            const current = this.readLockOwner(this.lock);
+            if (current?.token !== observedToken)
+                return;
+            let mtimeMs;
+            try {
+                mtimeMs = statSync(this.lock).mtimeMs;
+            }
+            catch {
+                return;
+            }
+            if (this.isAbandoned(current, mtimeMs))
+                rmSync(this.lock, { force: true });
+        }
+        finally {
+            rmSync(guard, { force: true });
+        }
     }
     acquire() {
         const token = randomUUID();
