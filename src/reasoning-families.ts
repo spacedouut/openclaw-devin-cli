@@ -274,6 +274,7 @@ export function loadDevinCatalogSync(command: string): DevinModelFamily[] {
     rememberDevinCatalog(families);
     return families;
   } catch {
-    return [];
+    memoryCatalog = [];
+    return memoryCatalog;
   }
 }

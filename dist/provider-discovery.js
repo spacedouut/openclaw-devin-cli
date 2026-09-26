@@ -23,7 +23,7 @@ const STATIC_MODELS = [
     ...["swe-2", "claude-sonnet-5", "claude-opus-5-5", "gpt-6-astra", "kimi-k3", "deepseek-v4-1-flash"].map((id) => ({
         id,
         name: id,
-        reasoning: true,
+        reasoning: false,
         input: ["text"],
         cost: ZERO_COST,
         contextWindow: DEFAULT_CONTEXT_WINDOW,

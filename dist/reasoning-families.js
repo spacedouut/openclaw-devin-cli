@@ -210,6 +210,7 @@ export function loadDevinCatalogSync(command) {
         return families;
     }
     catch {
-        return [];
+        memoryCatalog = [];
+        return memoryCatalog;
     }
 }

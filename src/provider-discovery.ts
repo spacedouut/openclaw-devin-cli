@@ -59,7 +59,7 @@ const STATIC_MODELS: CatalogModel[] = [
     (id): CatalogModel => ({
       id,
       name: id,
-      reasoning: true,
+      reasoning: false,
       input: ["text"],
       cost: ZERO_COST,
       contextWindow: DEFAULT_CONTEXT_WINDOW,
