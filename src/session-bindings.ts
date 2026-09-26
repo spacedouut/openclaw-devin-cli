@@ -2,7 +2,7 @@
  * Plugin-owned map from OpenClaw session ids to native Devin ACP sessions.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type DevinSessionBinding = {
@@ -15,16 +15,15 @@ export type DevinSessionBinding = {
 type BindingFile = { version: 1; sessions: Record<string, DevinSessionBinding> };
 
 const LOCK_TIMEOUT_MS = 5_000;
-const LOCK_STALE_MS = 2_000;
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 export class DevinSessionBindings {
   private readonly file: string;
-  private readonly lock: string;
+  private readonly lockDir: string;
 
   constructor(stateDir: string) {
     this.file = join(stateDir, "plugins", "devin-cli", "sessions.json");
-    this.lock = `${this.file}.lock`;
+    this.lockDir = `${this.file}.lock.d`;
   }
 
   private read(): BindingFile {
@@ -57,93 +56,96 @@ export class DevinSessionBindings {
     }
   }
 
-  private isAbandoned(owner: { pid: number } | undefined, mtimeMs: number): boolean {
-    if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) {
-      return Date.now() - mtimeMs > LOCK_STALE_MS;
-    }
+  private isDead(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
     try {
-      process.kill(owner.pid, 0);
+      process.kill(pid, 0);
       return false;
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "ESRCH";
     }
   }
 
-  private reclaim(observedToken: string | undefined): void {
-    const guard = `${this.lock}.reclaim`;
-    try {
-      const fd = openSync(guard, "wx", 0o600);
-      try {
-        writeSync(fd, `${randomUUID()} ${process.pid}`);
-      } finally {
-        closeSync(fd);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        if (this.isAbandoned(this.readLockOwner(guard), statSync(guard).mtimeMs)) rmSync(guard, { force: true });
-      } catch {
-        // guard released between attempts
-      }
-      return;
-    }
-    try {
-      const current = this.readLockOwner(this.lock);
-      if (current?.token !== observedToken) return;
-      let mtimeMs: number;
-      try {
-        mtimeMs = statSync(this.lock).mtimeMs;
-      } catch {
-        return;
-      }
-      if (this.isAbandoned(current, mtimeMs)) rmSync(this.lock, { force: true });
-    } finally {
-      rmSync(guard, { force: true });
+  private generation(n: number): string {
+    return join(this.lockDir, `g${n}`);
+  }
+
+  private generations(): number[] {
+    return readdirSync(this.lockDir).flatMap((name) => {
+      const match = /^g(\d+)$/.exec(name);
+      return match ? [Number(match[1])] : [];
+    });
+  }
+
+  /**
+   * Generation n is held until g<n>.released exists or its owner is confirmed dead. A new owner takes
+   * generation n+1 by linking a pre-written owner file there, so every claim is a single atomic create
+   * and no process ever deletes a lock another process may hold.
+   */
+  private isFree(n: number): boolean {
+    if (n === 0 || existsSync(`${this.generation(n)}.released`)) return true;
+    const owner = this.readLockOwner(this.generation(n));
+    return !owner || this.isDead(owner.pid);
+  }
+
+  private prune(held: number): void {
+    for (const name of readdirSync(this.lockDir)) {
+      const gen = /^g(\d+)(\.released)?$/.exec(name);
+      const stale = gen
+        ? Number(gen[1]) < held
+        : name.endsWith(".tmp") && this.isDead(this.readLockOwner(join(this.lockDir, name))?.pid ?? 0);
+      if (stale) rmSync(join(this.lockDir, name), { force: true });
     }
   }
 
-  private acquire(): string {
+  private acquire(): number {
+    mkdirSync(this.lockDir, { recursive: true });
     const token = randomUUID();
+    const claim = join(this.lockDir, `${token}.tmp`);
+    writeFileSync(claim, `${token} ${process.pid}`, { mode: 0o600 });
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
-    for (;;) {
-      try {
-        const fd = openSync(this.lock, "wx", 0o600);
-        try {
-          writeSync(fd, `${token} ${process.pid}`);
-        } finally {
-          closeSync(fd);
+    try {
+      for (;;) {
+        const current = Math.max(0, ...this.generations());
+        if (this.isFree(current)) {
+          const next = current + 1;
+          try {
+            linkSync(claim, this.generation(next));
+            if (Math.max(...this.generations()) === next) {
+              this.prune(next);
+              return next;
+            }
+            this.release(next);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+          }
         }
-        return token;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (Date.now() > deadline) throw new Error(`Timed out waiting for ${this.lockDir}`);
+        Atomics.wait(sleeper, 0, 0, 5);
       }
-      const owner = this.readLockOwner(this.lock);
-      let mtimeMs: number | undefined;
-      try {
-        mtimeMs = statSync(this.lock).mtimeMs;
-      } catch {
-        continue;
-      }
-      if (this.isAbandoned(owner, mtimeMs)) this.reclaim(owner?.token);
-      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${this.lock}`);
-      Atomics.wait(sleeper, 0, 0, 5);
+    } finally {
+      rmSync(claim, { force: true });
     }
   }
 
-  private release(token: string): void {
-    if (this.readLockOwner(this.lock)?.token === token) rmSync(this.lock, { force: true });
+  private release(generation: number): void {
+    try {
+      writeFileSync(`${this.generation(generation)}.released`, "", { flag: "wx", mode: 0o600 });
+    } catch {
+      // already released
+    }
   }
 
   private update<T>(mutate: (data: BindingFile) => { result: T; changed: boolean }): T {
     mkdirSync(dirname(this.file), { recursive: true });
-    const token = this.acquire();
+    const generation = this.acquire();
     try {
       const data = this.read();
       const { result, changed } = mutate(data);
       if (changed) this.write(data);
       return result;
     } finally {
-      this.release(token);
+      this.release(generation);
     }
   }
 
