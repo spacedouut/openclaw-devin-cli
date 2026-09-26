@@ -40,11 +40,18 @@ Client Protocol server (JSON-RPC over stdio). Per turn it:
    ```jsonl
    {"type":"system","subtype":"session","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
    {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_1",…}}}
+   {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
    {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll run it."}}}
+   {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
    {"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_…","name":"exec","input":{"command":"uname -r"}}}}
+   {"type":"stream_event","event":{"type":"content_block_stop","index":1}}
    {"type":"stream_event","event":{"type":"message_stop"}}
    {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_…","content":"6.8.0-1061-aws","is_error":false}]}}
+   {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_2",…}}}
+   {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
    {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Kernel is 6.8.0-1061-aws."}}}
+   {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+   {"type":"stream_event","event":{"type":"message_stop"}}
    {"type":"result","subtype":"success","result":"Kernel is 6.8.0-1061-aws.","session_id":"quilt-bubbler","usage":{…}}
    ```
 

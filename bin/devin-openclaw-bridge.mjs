@@ -402,8 +402,10 @@ async function main() {
     }
 
     if (stopReason === "cancelled" || cancelled) {
+      closeMessage();
       emitError("Devin turn was cancelled.", sessionId);
     } else if (stopReason === "refusal") {
+      closeMessage();
       emitError(reply.trim() || "Devin refused this request.", sessionId);
     } else {
       if (!reply.trim()) {
@@ -429,6 +431,7 @@ async function main() {
   } catch (err) {
     const outcome = await Promise.race([exited, new Promise((r) => setTimeout(() => r(undefined), 200))]);
     if (outcome?.error?.code === "ENOENT") {
+      closeMessage();
       emitError(
         `devin CLI binary '${DEVIN_COMMAND}' not found on PATH. Install with: curl -fsSL https://cli.devin.ai/install.sh | bash && devin auth login`,
         sessionId,
@@ -439,6 +442,7 @@ async function main() {
         .filter((l) => /\b(ERROR|WARN|error|Error)\b/.test(l))
         .join("\n")
         .slice(-STDERR_TAIL);
+      closeMessage();
       emitError(`devin acp failed: ${err?.acp?.message ?? err?.message ?? err}`, sessionId, tail ? [tail] : []);
     }
   } finally {
