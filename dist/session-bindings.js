@@ -1,10 +1,11 @@
 /**
  * Plugin-owned map from OpenClaw session ids to native Devin ACP sessions.
  */
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 const LOCK_TIMEOUT_MS = 5_000;
-const LOCK_STALE_MS = 30_000;
+const LOCK_STALE_MS = 2_000;
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 export class DevinSessionBindings {
     file;
@@ -34,29 +35,88 @@ export class DevinSessionBindings {
         writeFileSync(tmp, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
         renameSync(tmp, this.file);
     }
-    update(mutate) {
-        mkdirSync(dirname(this.file), { recursive: true });
+    readLockOwner(path) {
+        try {
+            const [token, pid] = readFileSync(path, "utf8").split(" ");
+            return token ? { token, pid: Number(pid) } : undefined;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    isAbandoned(owner, mtimeMs) {
+        if (Date.now() - mtimeMs > LOCK_STALE_MS)
+            return true;
+        if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0)
+            return false;
+        try {
+            process.kill(owner.pid, 0);
+            return false;
+        }
+        catch (error) {
+            return error.code === "ESRCH";
+        }
+    }
+    reclaim(observedToken) {
+        const claimed = `${this.lock}.${randomUUID()}.stale`;
+        try {
+            renameSync(this.lock, claimed);
+        }
+        catch {
+            return;
+        }
+        if (this.readLockOwner(claimed)?.token !== observedToken) {
+            try {
+                linkSync(claimed, this.lock);
+            }
+            catch {
+                // a new owner already holds the lock
+            }
+        }
+        rmSync(claimed, { force: true });
+    }
+    acquire() {
+        const token = randomUUID();
         const deadline = Date.now() + LOCK_TIMEOUT_MS;
         for (;;) {
             try {
-                closeSync(openSync(this.lock, "wx", 0o600));
-                break;
+                const fd = openSync(this.lock, "wx", 0o600);
+                try {
+                    writeSync(fd, `${token} ${process.pid}`);
+                }
+                finally {
+                    closeSync(fd);
+                }
+                return token;
             }
             catch (error) {
                 if (error.code !== "EEXIST")
                     throw error;
-                try {
-                    if (Date.now() - statSync(this.lock).mtimeMs > LOCK_STALE_MS)
-                        rmSync(this.lock, { force: true });
-                }
-                catch {
-                    // lock released between attempts
-                }
-                if (Date.now() > deadline)
-                    throw new Error(`Timed out waiting for ${this.lock}`);
-                Atomics.wait(sleeper, 0, 0, 25);
             }
+            const owner = this.readLockOwner(this.lock);
+            let mtimeMs;
+            try {
+                mtimeMs = statSync(this.lock).mtimeMs;
+            }
+            catch {
+                continue;
+            }
+            if (this.isAbandoned(owner, mtimeMs)) {
+                this.reclaim(owner?.token);
+                continue;
+            }
+            if (Date.now() > deadline)
+                throw new Error(`Timed out waiting for ${this.lock}`);
+            Atomics.wait(sleeper, 0, 0, 5);
         }
+    }
+    release(token) {
+        if (this.readLockOwner(this.lock)?.token === token)
+            rmSync(this.lock, { force: true });
+    }
+    update(mutate) {
+        mkdirSync(dirname(this.file), { recursive: true });
+        const token = this.acquire();
         try {
             const data = this.read();
             const { result, changed } = mutate(data);
@@ -65,7 +125,7 @@ export class DevinSessionBindings {
             return result;
         }
         finally {
-            rmSync(this.lock, { force: true });
+            this.release(token);
         }
     }
     get(sessionId) {

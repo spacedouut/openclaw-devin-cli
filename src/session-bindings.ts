@@ -1,7 +1,8 @@
 /**
  * Plugin-owned map from OpenClaw session ids to native Devin ACP sessions.
  */
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { closeSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export type DevinSessionBinding = {
@@ -14,7 +15,7 @@ export type DevinSessionBinding = {
 type BindingFile = { version: 1; sessions: Record<string, DevinSessionBinding> };
 
 const LOCK_TIMEOUT_MS = 5_000;
-const LOCK_STALE_MS = 30_000;
+const LOCK_STALE_MS = 2_000;
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 export class DevinSessionBindings {
@@ -47,31 +48,88 @@ export class DevinSessionBindings {
     renameSync(tmp, this.file);
   }
 
-  private update<T>(mutate: (data: BindingFile) => { result: T; changed: boolean }): T {
-    mkdirSync(dirname(this.file), { recursive: true });
+  private readLockOwner(path: string): { token: string; pid: number } | undefined {
+    try {
+      const [token, pid] = readFileSync(path, "utf8").split(" ");
+      return token ? { token, pid: Number(pid) } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private isAbandoned(owner: { pid: number } | undefined, mtimeMs: number): boolean {
+    if (Date.now() - mtimeMs > LOCK_STALE_MS) return true;
+    if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+    try {
+      process.kill(owner.pid, 0);
+      return false;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH";
+    }
+  }
+
+  private reclaim(observedToken: string | undefined): void {
+    const claimed = `${this.lock}.${randomUUID()}.stale`;
+    try {
+      renameSync(this.lock, claimed);
+    } catch {
+      return;
+    }
+    if (this.readLockOwner(claimed)?.token !== observedToken) {
+      try {
+        linkSync(claimed, this.lock);
+      } catch {
+        // a new owner already holds the lock
+      }
+    }
+    rmSync(claimed, { force: true });
+  }
+
+  private acquire(): string {
+    const token = randomUUID();
     const deadline = Date.now() + LOCK_TIMEOUT_MS;
     for (;;) {
       try {
-        closeSync(openSync(this.lock, "wx", 0o600));
-        break;
+        const fd = openSync(this.lock, "wx", 0o600);
+        try {
+          writeSync(fd, `${token} ${process.pid}`);
+        } finally {
+          closeSync(fd);
+        }
+        return token;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        try {
-          if (Date.now() - statSync(this.lock).mtimeMs > LOCK_STALE_MS) rmSync(this.lock, { force: true });
-        } catch {
-          // lock released between attempts
-        }
-        if (Date.now() > deadline) throw new Error(`Timed out waiting for ${this.lock}`);
-        Atomics.wait(sleeper, 0, 0, 25);
       }
+      const owner = this.readLockOwner(this.lock);
+      let mtimeMs: number | undefined;
+      try {
+        mtimeMs = statSync(this.lock).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (this.isAbandoned(owner, mtimeMs)) {
+        this.reclaim(owner?.token);
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`Timed out waiting for ${this.lock}`);
+      Atomics.wait(sleeper, 0, 0, 5);
     }
+  }
+
+  private release(token: string): void {
+    if (this.readLockOwner(this.lock)?.token === token) rmSync(this.lock, { force: true });
+  }
+
+  private update<T>(mutate: (data: BindingFile) => { result: T; changed: boolean }): T {
+    mkdirSync(dirname(this.file), { recursive: true });
+    const token = this.acquire();
     try {
       const data = this.read();
       const { result, changed } = mutate(data);
       if (changed) this.write(data);
       return result;
     } finally {
-      rmSync(this.lock, { force: true });
+      this.release(token);
     }
   }
 
