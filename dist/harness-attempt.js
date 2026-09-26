@@ -243,7 +243,8 @@ export async function runDevinAttempt(input, deps) {
         });
         messages = sessionContext.buildSessionContext().messages;
         assertActive();
-        const binding = deps.bindings.get(input.sessionId);
+        const stored = deps.bindings.get(input.sessionId);
+        const binding = stored?.cwd === input.workspaceDir ? stored : undefined;
         const model = deps.resolveModel(input);
         const permissionMode = deps.resolvePermissionMode(input);
         const acpMode = ACP_MODES[permissionMode] ?? permissionMode;
@@ -256,7 +257,7 @@ export async function runDevinAttempt(input, deps) {
         }
         const requestId = `${admission.entryId}:devin:${randomUUID()}`;
         projector = new DevinTurnProjector({ modelRef, keyPrefix: requestId });
-        const cwd = binding?.cwd ?? input.workspaceDir;
+        const cwd = input.workspaceDir;
         acp = new DevinAcpProcess(deps.command, { cwd, model }, {
             onUpdate: (sessionId, update) => {
                 if (!started || sessionId !== devinSessionId || signal.aborted)
