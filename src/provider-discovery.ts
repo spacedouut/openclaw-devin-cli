@@ -11,6 +11,15 @@
  */
 import { execFile } from "node:child_process";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
+import {
+  deriveReasoningFamilies,
+  mergeConfiguredFamilies,
+  parseDevinCatalog,
+  rememberDevinCatalog,
+  type DevinModelFamily,
+  type ReasoningFamilies,
+  type ReasoningFamilyConfig,
+} from "./reasoning-families.js";
 
 const BACKEND_ID = "devin-cli";
 
@@ -42,129 +51,99 @@ export type ProviderCatalogContext = {
   signal?: AbortSignal;
 };
 
-type DevinModelVariant = {
-  model_uid?: string;
-  label?: string;
-  max_context_tokens?: number;
-  max_output_tokens?: number;
-  is_beta?: boolean;
-};
-
-type DevinModelFamily = {
-  family_label?: string;
-  slug?: string;
-  aliases?: string[];
-  variants?: DevinModelVariant[];
-};
-
 /** Offline seed so `devin-cli` is visible in model pickers before auth.
  * Every id is a value `devin --model` accepts natively. */
 const STATIC_MODELS: CatalogModel[] = [
   { id: "adaptive", name: "Adaptive", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
-  { id: "swe-2", name: "SWE-2", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
-  {
-    id: "swe-2-high",
-    name: "SWE-2 High",
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
-  },
-  {
-    id: "swe-2-medium",
-    name: "SWE-2 Medium",
-    reasoning: false,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
-  },
-  {
-    id: "swe-2-max",
-    name: "SWE-2 Max",
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    contextWindow: DEFAULT_CONTEXT_WINDOW,
-    maxTokens: DEFAULT_MAX_TOKENS,
-  },
-  {
-    id: "claude-sonnet-4",
-    name: "Claude Sonnet 4",
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    maxTokens: DEFAULT_MAX_TOKENS,
-  },
-  {
-    id: "claude-opus-4.6",
-    name: "Claude Opus 4.6",
-    reasoning: true,
-    input: ["text"],
-    cost: ZERO_COST,
-    maxTokens: DEFAULT_MAX_TOKENS,
-  },
-  { id: "opus", name: "Claude Opus (alias)", reasoning: true, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
-  { id: "codex", name: "Codex", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
+  ...["swe-2", "claude-sonnet-5", "claude-opus-5-5", "gpt-6-astra", "kimi-k3", "deepseek-v4-1-flash"].map(
+    (id): CatalogModel => ({
+      id,
+      name: id,
+      reasoning: false,
+      input: ["text"],
+      cost: ZERO_COST,
+      contextWindow: DEFAULT_CONTEXT_WINDOW,
+      maxTokens: DEFAULT_MAX_TOKENS,
+    }),
+  ),
 ];
 
 export function staticProvider(): CatalogProvider {
   return { baseUrl: "", defaultModel: "adaptive", models: STATIC_MODELS };
 }
 
+type ReasoningPluginConfig = {
+  command?: unknown;
+  autoReasoningFamilies?: unknown;
+  reasoningFamilies?: Record<string, ReasoningFamilyConfig>;
+};
+
+function rawPluginConfig(config: unknown): ReasoningPluginConfig {
+  return (resolvePluginConfigObject(config as never, BACKEND_ID) ?? {}) as ReasoningPluginConfig;
+}
+
 export function devinCommand(ctx: ProviderCatalogContext): string {
-  const raw = resolvePluginConfigObject(ctx.config as never, BACKEND_ID);
-  const command = (raw as { command?: unknown } | null | undefined)?.command;
+  const command = rawPluginConfig(ctx.config).command;
   return typeof command === "string" && command.trim() ? command.trim() : "devin";
 }
 
-/** Flatten `devin models list --format json` families into catalog models:
- * one entry per family slug + family alias + variant model_uid. */
-function modelsFromFamilies(families: DevinModelFamily[]): CatalogModel[] {
-  const seen = new Set<string>();
-  const models: CatalogModel[] = [];
-  const push = (model: CatalogModel | undefined) => {
-    if (model?.id && !seen.has(model.id)) {
-      seen.add(model.id);
-      models.push(model);
+/** Reasoning families in effect: auto-derived from Devin's catalog (unless
+ * `autoReasoningFamilies: false`) with configured `reasoningFamilies` on top. */
+export function reasoningFamiliesFor(
+  config: unknown,
+  catalog: DevinModelFamily[],
+): { families: ReasoningFamilies; standalone: string[] } {
+  const raw = rawPluginConfig(config);
+  const derived = deriveReasoningFamilies(catalog);
+  const auto = raw.autoReasoningFamilies === false ? {} : derived.families;
+  const families = mergeConfiguredFamilies(auto, raw.reasoningFamilies);
+  const claimed = new Set<string>();
+  for (const family of Object.values(families)) {
+    for (const uid of [
+      ...Object.values(family.levels),
+      ...Object.values(family.fastLevels ?? {}),
+      family.base,
+    ]) {
+      if (uid) claimed.add(uid.toLowerCase());
     }
-  };
-  for (const family of families) {
-    push(
-      family.slug
-        ? {
-            id: family.slug,
-            name: family.family_label ?? family.slug,
-            reasoning: false,
-            input: ["text"],
-            cost: ZERO_COST,
-            maxTokens: DEFAULT_MAX_TOKENS,
-          }
-        : undefined,
-    );
-    for (const alias of family.aliases ?? []) {
-      push({
-        id: alias,
-        name: family.family_label ?? alias,
-        reasoning: false,
-        input: ["text"],
-        cost: ZERO_COST,
-        maxTokens: DEFAULT_MAX_TOKENS,
-      });
-    }
-    for (const variant of family.variants ?? []) {
-      if (!variant.model_uid) continue;
-      push({
-        id: variant.model_uid,
-        name: variant.label ?? variant.model_uid,
-        reasoning: false,
-        input: ["text"],
-        cost: ZERO_COST,
-        contextWindow: variant.max_context_tokens ?? DEFAULT_CONTEXT_WINDOW,
-        maxTokens: variant.max_output_tokens ?? DEFAULT_MAX_TOKENS,
-      });
-    }
+  }
+  const standalone = catalog
+    .flatMap((f) => f.variants ?? [])
+    .map((v) => v.model_uid)
+    .filter((uid): uid is string => Boolean(uid) && !claimed.has((uid as string).toLowerCase()));
+  return { families, standalone };
+}
+
+/** One catalog row per reasoning family (effort picked by OpenClaw's thinking
+ * level) plus one row per Devin variant that isn't part of a family. */
+function modelsFromCatalog(config: unknown, catalog: DevinModelFamily[]): CatalogModel[] {
+  const { families, standalone } = reasoningFamiliesFor(config, catalog);
+  const variants = new Map(
+    catalog.flatMap((f) => f.variants ?? []).map((v) => [v.model_uid, v] as const),
+  );
+  const models: CatalogModel[] = Object.entries(families).map(([id, family]) => ({
+    id,
+    name: family.label ?? id,
+    reasoning: true,
+    input: ["text"],
+    cost: ZERO_COST,
+    contextWindow: family.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    maxTokens: family.maxTokens ?? DEFAULT_MAX_TOKENS,
+  }));
+  const seen = new Set(models.map((m) => m.id));
+  for (const uid of standalone) {
+    if (seen.has(uid)) continue;
+    seen.add(uid);
+    const variant = variants.get(uid);
+    models.push({
+      id: uid,
+      name: variant?.label ?? uid,
+      reasoning: false,
+      input: ["text"],
+      cost: ZERO_COST,
+      contextWindow: variant?.max_context_tokens ?? DEFAULT_CONTEXT_WINDOW,
+      maxTokens: variant?.max_output_tokens ?? DEFAULT_MAX_TOKENS,
+    });
   }
   return models;
 }
@@ -183,8 +162,9 @@ export async function listDevinModels(ctx: ProviderCatalogContext): Promise<Cata
       (error, stdout) => (error ? reject(error) : resolve(stdout)),
     );
   });
-  const parsed = JSON.parse(output) as { families?: DevinModelFamily[] };
-  return modelsFromFamilies(parsed.families ?? []);
+  const catalog = parseDevinCatalog(output);
+  rememberDevinCatalog(catalog);
+  return modelsFromCatalog(ctx.config, catalog);
 }
 
 /** Shared catalog hook body: live `devin models list`, static seed fallback. */

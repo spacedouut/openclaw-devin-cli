@@ -1,6 +1,6 @@
 {
   "name": "openclaw-devin-cli",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "OpenClaw CLI backend plugin for Cognition Devin CLI",
   "type": "module",
   "license": "MIT",
@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs"
   },
   "peerDependencies": {
     "openclaw": ">=2026.9.0"

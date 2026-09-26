@@ -30,17 +30,29 @@ Client Protocol server (JSON-RPC over stdio). Per turn it:
    lifecycle updates, and usage. `session/request_permission` is answered by
    the bridge (allow, except in `ask` mode), so tools never hang on a missing
    TTY.
-4. Streams the turn to stdout as JSONL in Gemini CLI's `stream-json` shape
-   (`jsonlDialect: "gemini-stream-json"`), so OpenClaw shows text deltas and
-   Devin's native tool calls live:
+4. Streams the turn to stdout as JSONL in Claude Code's `stream-json` shape
+   (`jsonlDialect: "claude-stream-json"`). Each text run plus the tool calls
+   that follow it is one assistant message and tool results are user
+   messages, so OpenClaw shows Devin's tool calls live and keeps pre-tool text
+   interleaved with them (as commentary) instead of merging all text into the
+   final reply:
 
    ```jsonl
-   {"type":"init","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
-   {"type":"message","role":"assistant","content":"I'll run it.","delta":true}
-   {"type":"tool_use","tool_id":"call_…","tool_name":"exec","parameters":{"title":"Ran uname","command":"uname -r"}}
-   {"type":"tool_result","tool_id":"call_…","status":"success","output":"6.8.0-1061-aws"}
-   {"type":"message","role":"assistant","content":"\n\nKernel is 6.8.0-1061-aws.","delta":true}
-   {"type":"result","status":"success","session_id":"quilt-bubbler","usage":{…}}
+   {"type":"system","subtype":"session","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
+   {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_1",…}}}
+   {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+   {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll run it."}}}
+   {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+   {"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_…","name":"exec","input":{"command":"uname -r"}}}}
+   {"type":"stream_event","event":{"type":"content_block_stop","index":1}}
+   {"type":"stream_event","event":{"type":"message_stop"}}
+   {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_…","content":"6.8.0-1061-aws","is_error":false}]}}
+   {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_2",…}}}
+   {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
+   {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Kernel is 6.8.0-1061-aws."}}}
+   {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
+   {"type":"stream_event","event":{"type":"message_stop"}}
+   {"type":"result","subtype":"success","result":"Kernel is 6.8.0-1061-aws.","session_id":"quilt-bubbler","usage":{…}}
    ```
 
    If Devin ends a turn without any text, the bridge streams a summary of the
@@ -79,6 +91,8 @@ openclaw plugins enable devin-cli --accept-capabilities
           // "command": "devin",            // binary name or absolute path
           // "permissionMode": "smart",     // auto | accept-edits | smart | dangerous
           // "modelAliases": { "max": "swe-2-max" } // custom short ids -> devin --model ids
+          // "autoReasoningFamilies": true, // one model per family; thinking level picks the variant
+          // "reasoningFamilies": { ... }   // explicit family -> level -> variant maps (see below)
         }
       }
     }
@@ -93,19 +107,57 @@ auto-runs actions a fast model judges safe. Permission prompts Devin still
 raises are auto-approved by the bridge, except in `auto` (ACP `ask`, read-only).
 Side-question executions are forced to `auto` regardless.
 
+## Reasoning families
+
+Devin encodes effort in the model id (`claude-opus-5-5-medium`, `-high`,
+`-max`, ...). The plugin collapses those into **one OpenClaw model per family**
+(`devin-cli/claude-opus-5-5`) and picks the variant from OpenClaw's thinking
+level (`/think`, the reasoning slider) on every run, so the model list stays
+short and the slider does the work.
+
+- **Auto (default):** families are derived from `devin models list`: every
+  variant named `<family>-<none|minimal|low|medium|high|xhigh|max>` becomes a
+  tier (`none` = OpenClaw `off`). `-fast` / `-priority` variants are used when
+  OpenClaw fast mode is on. Variants that don't follow the pattern (`fusion-*`,
+  `-1m`, `MODEL_*`, ...) stay as individual models. Devin's family aliases
+  (`opus`, `sonnet`, `codex`, ...) resolve to the family.
+- **Explicit:** `reasoningFamilies` defines or overrides a family; only the
+  listed levels appear in the slider.
+
+```jsonc
+"reasoningFamilies": {
+  "claude-opus-5-5": {
+    "levels": {
+      "medium": "claude-opus-5-5-medium",
+      "max": "claude-opus-5-5-max"
+    },
+    "fastLevels": { "max": "claude-opus-5-5-max-fast" }, // optional
+    "defaultLevel": "medium"                              // optional
+  }
+}
+```
+
+Resolution per run: exact level -> `base` variant (if set) -> nearest lower
+tier -> lowest tier. With no level set the family's `defaultLevel` is used
+(else `medium`, else `high`, else the lowest tier). Set
+`"autoReasoningFamilies": false` to list every Devin variant individually
+again (configured families still collapse). Variant ids like
+`devin-cli/claude-opus-5-5-max` keep working as direct refs.
+
 ## Usage
 
 The plugin exposes a model catalog for `devin-cli`: a static manifest seed
 keeps the provider visible offline, and `dist/provider-discovery.js` (declared
 via `providerCatalogEntry`) runs `devin models list --format json` when
-discovery refreshes, mapping each family slug, family alias, and variant
-`model_uid` into catalog models.
+discovery refreshes, publishing one row per reasoning family plus the
+variants that don't belong to one. The last catalog is cached in
+`~/.cache/openclaw-devin-cli/models.json` for per-run lookups.
 
 ```bash
-openclaw agent --local -m "hello" --model devin-cli/swe-2-max   # any model_uid / family slug / alias
+openclaw agent --local -m "hello" --model devin-cli/claude-opus-5-5 --thinking max  # -> claude-opus-5-5-max
+openclaw agent --local -m "hello" --model devin-cli/swe-2-max   # any model_uid still works
 openclaw agent --local -m "hello" --model devin-cli/adaptive
-openclaw agent --local -m "hello" --model devin-cli/sonnet      # built-in alias -> claude-sonnet-4
-openclaw agent --local -m "hello" --model devin-cli/opus-4.6    # built-in alias -> claude-opus-4.6
+openclaw agent --local -m "hello" --model devin-cli/sonnet      # Devin alias -> claude-sonnet-5 family
 # or interactively: openclaw chat, then /model devin-cli/opus
 ```
 
@@ -116,8 +168,7 @@ openclaw agent --local -m "hello" --model devin-cli/opus-4.6    # built-in alias
 
 Unmapped ids also pass straight through to `devin --model`, so refs keep
 working even for models missing from the catalog. Add your own short names
-via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json` —
-they merge over the built-in table.
+via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
 
 - **Session resume:** the ACP `session/new` id is returned as `session_id`;
   later turns reload it with ACP `session/load`.
@@ -143,6 +194,7 @@ they merge over the built-in table.
 npm install
 npm run check   # tsc --noEmit equivalent via build
 npm run build   # compiles src/ -> dist/
+npm test        # reasoning-family resolution (node:test, runs against dist/)
 ```
 
 Manual smoke test without OpenClaw:
