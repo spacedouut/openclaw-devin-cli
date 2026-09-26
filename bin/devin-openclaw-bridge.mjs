@@ -39,7 +39,7 @@ const DEVIN_CLIENT_META = {
 };
 
 // Devin tailors its system prompt to the ACP client identity; present as its own CLI client.
-const DEVIN_CLIENT_VERSION = "0.4.2";
+const DEVIN_CLIENT_VERSION = "0.5.0";
 
 const ACP_MODES = { dangerous: "bypass", smart: "smart", "accept-edits": "accept-edits", auto: "ask" };
 
@@ -52,8 +52,10 @@ function parseArgs(argv) {
     else if (a === "--oc-system") opts.system = next() ?? "";
     else if (a === "-r" || a === "--resume") opts.resume = next();
     else if (a === "--model" || a === "-m") opts.model = next();
+    else if (a === "--oc-model") opts.modelOverride = next();
     else if (a === "--permission-mode") opts.mode = next();
   }
+  if (opts.modelOverride) opts.model = opts.modelOverride;
   return opts;
 }
 
@@ -170,7 +172,7 @@ async function main() {
   const child = spawn(DEVIN_COMMAND, ["acp", ...(opts.model ? ["--model", opts.model] : [])], {
     stdio: ["pipe", "pipe", "pipe"],
     // `devin -p` enables shell-first file-op guidance; ACP only honours it via env.
-    env: { DEVIN_PREFER_EXEC_TOOL: "true", ...process.env, NO_COLOR: "1", TERM: "dumb" },
+    env: { ...process.env, DEVIN_PREFER_EXEC_TOOL: "true", NO_COLOR: "1", TERM: "dumb" },
   });
 
   let stderr = "";

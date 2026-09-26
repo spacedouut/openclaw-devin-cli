@@ -10,6 +10,7 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
   definePluginEntry,
+  type OpenClawConfig,
   type OpenClawPluginApi,
   type ProviderRuntimeModel,
 } from "openclaw/plugin-sdk/plugin-entry";
@@ -26,8 +27,17 @@ import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-run
 import {
   devinCliCatalog,
   devinCommand,
+  reasoningFamiliesFor,
   staticProvider,
 } from "./provider-discovery.js";
+import {
+  familyDefaultLevel,
+  familyLevels,
+  findReasoningFamily,
+  loadDevinCatalogSync,
+  resolveFamilyVariant,
+  type ReasoningFamilyConfig,
+} from "./reasoning-families.js";
 
 // The real `CliBackendPlugin` type is only re-exported from plugin-entry under
 // a minified alias; deriving it from the typed API signature is more stable.
@@ -36,6 +46,7 @@ type ProviderPlugin = Parameters<OpenClawPluginApi["registerProvider"]>[0];
 
 const BACKEND_ID = "devin-cli";
 const PERMISSION_MODE_ARG = "--permission-mode";
+const MODEL_OVERRIDE_ARG = "--oc-model";
 const BRIDGE_PATH = fileURLToPath(
   new URL("../bin/devin-openclaw-bridge.mjs", import.meta.url),
 );
@@ -47,6 +58,10 @@ type DevinCliPluginConfig = {
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
   /** Extra/override OpenClaw model ids -> `devin --model` ids. */
   modelAliases?: Record<string, string>;
+  /** Derive reasoning families from `devin models list` (default true). */
+  autoReasoningFamilies?: boolean;
+  /** OpenClaw model id -> thinking level -> `devin --model` id. */
+  reasoningFamilies?: Record<string, ReasoningFamilyConfig>;
 };
 
 function pluginConfig(context?: CliBackendNormalizeConfigContext): DevinCliPluginConfig {
@@ -102,23 +117,36 @@ function normalizeDevinBackendConfig(
   };
 }
 
-/** Side-question (/btw) turns should not mutate the workspace: pin the CLI to
- * its read-mostly "auto" permission mode for that execution mode only. */
+function findFamily(config: OpenClawConfig | undefined, modelId: string) {
+  const catalog = loadDevinCatalogSync(devinCommand({ config }));
+  return findReasoningFamily(reasoningFamiliesFor(config, catalog).families, modelId);
+}
+
+/** Per run: map a reasoning family + OpenClaw thinking level (and fast mode)
+ * to the Devin variant, and pin side-question (/btw) turns to Devin's
+ * read-mostly "auto" permission mode. */
 function resolveDevinExecutionArgs(
   ctx: CliBackendResolveExecutionArgsContext,
 ): readonly string[] | undefined {
-  if (ctx.executionMode !== "side-question") {
+  const match = findFamily(ctx.config, ctx.modelId);
+  const variant = match
+    ? resolveFamilyVariant(match.family, ctx.thinkingLevel, ctx.fastMode === true)
+    : undefined;
+  if (!variant && ctx.executionMode !== "side-question") {
     return undefined;
   }
-  return withPermissionMode([...ctx.baseArgs], "auto");
+  let args = [...ctx.baseArgs];
+  if (ctx.executionMode === "side-question") {
+    args = withPermissionMode(args, "auto");
+  }
+  if (variant) {
+    args.push(MODEL_OVERRIDE_ARG, variant);
+  }
+  return args;
 }
 
-const DEVIN_MODEL_ALIASES: Record<string, string> = {
-  // Short OpenClaw ids -> `devin --model` ids confirmed in `devin --help`.
-  sonnet: "claude-sonnet-4",
-  "opus-4.6": "claude-opus-4.6",
-  // "opus" and "codex" are already valid native ids and pass through as-is.
-};
+// Devin's own family aliases (sonnet, opus, codex, ...) resolve natively.
+const DEVIN_MODEL_ALIASES: Record<string, string> = {};
 
 function buildDevinCliBackend(): CliBackendPlugin {
   return {
@@ -172,7 +200,7 @@ function buildDevinCliBackend(): CliBackendPlugin {
  * `resolveDynamicModel` resolves any model id — Devin CLI owns id validation
  * and accepts arbitrary `--model` values, so resolution passes ids through.
  */
-function buildDevinCliProvider(): ProviderPlugin {
+function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlugin {
   return {
     id: BACKEND_ID,
     label: "Devin CLI",
@@ -207,11 +235,27 @@ function buildDevinCliProvider(): ProviderPlugin {
         ? { apiKey: "openclaw:devin-cli-native-auth", source: "Devin CLI native auth", mode: "oauth" as const }
         : undefined;
     },
+    resolveThinkingProfile: ({ modelId }) => {
+      const match = findFamily(config, modelId);
+      if (!match) {
+        return undefined;
+      }
+      return {
+        levels: familyLevels(match.family).map((id) => ({ id })),
+        defaultLevel: familyDefaultLevel(match.family) ?? null,
+        preserveWhenCatalogReasoningFalse: true,
+      };
+    },
+    resolveFastModeSupport: ({ modelId }) => {
+      const match = findFamily(config, modelId);
+      return match ? Boolean(match.family.fastLevels) : undefined;
+    },
     resolveDynamicModel: (ctx): ProviderRuntimeModel | undefined => {
       const modelId = ctx.modelId.trim();
       if (!modelId) {
         return undefined;
       }
+      const match = findFamily(config, modelId);
       return {
         id: modelId,
         name: modelId,
@@ -221,11 +265,11 @@ function buildDevinCliProvider(): ProviderPlugin {
         // bundled claude-cli catalog rows resolve to.
         api: "openai-responses",
         baseUrl: "",
-        reasoning: false,
+        reasoning: Boolean(match),
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 262_000,
-        maxTokens: 128_000,
+        contextWindow: match?.family.contextWindow ?? 262_000,
+        maxTokens: match?.family.maxTokens ?? 128_000,
       };
     },
   };
@@ -237,6 +281,6 @@ export default definePluginEntry({
   description: "Run Cognition's Devin CLI through OpenClaw",
   register(api) {
     api.registerCliBackend(buildDevinCliBackend());
-    api.registerProvider(buildDevinCliProvider());
+    api.registerProvider(buildDevinCliProvider(api.config));
   },
 });

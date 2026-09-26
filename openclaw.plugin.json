@@ -25,14 +25,12 @@
         "defaultModel": "adaptive",
         "models": [
           { "id": "adaptive", "name": "Adaptive", "input": ["text"] },
-          { "id": "swe-2", "name": "SWE-2", "input": ["text"] },
-          { "id": "swe-2-high", "name": "SWE-2 High", "input": ["text"], "reasoning": true },
-          { "id": "swe-2-medium", "name": "SWE-2 Medium", "input": ["text"] },
-          { "id": "swe-2-max", "name": "SWE-2 Max", "input": ["text"], "reasoning": true },
-          { "id": "claude-sonnet-4", "name": "Claude Sonnet 4", "input": ["text"], "reasoning": true },
-          { "id": "claude-opus-4.6", "name": "Claude Opus 4.6", "input": ["text"], "reasoning": true },
-          { "id": "opus", "name": "Claude Opus (alias)", "input": ["text"], "reasoning": true },
-          { "id": "codex", "name": "Codex", "input": ["text"] }
+          { "id": "swe-2", "name": "SWE-2", "input": ["text"], "reasoning": true },
+          { "id": "claude-sonnet-5", "name": "Claude Sonnet 5", "input": ["text"], "reasoning": true },
+          { "id": "claude-opus-5-5", "name": "Claude Opus 5.5", "input": ["text"], "reasoning": true },
+          { "id": "gpt-6-astra", "name": "GPT-6 Astra", "input": ["text"], "reasoning": true },
+          { "id": "kimi-k3", "name": "Kimi K3", "input": ["text"], "reasoning": true },
+          { "id": "deepseek-v4-1-flash", "name": "DeepSeek V4.1 Flash", "input": ["text"], "reasoning": true }
         ]
       }
     },
@@ -62,6 +60,34 @@
         "type": "object",
         "additionalProperties": { "type": "string" },
         "description": "Extra OpenClaw model ids mapped to `devin --model` ids (merged over built-in aliases)."
+      },
+      "autoReasoningFamilies": {
+        "type": "boolean",
+        "description": "Collapse Devin's `<family>-<effort>` variants into one model per family and pick the variant from OpenClaw's thinking level. Default: true."
+      },
+      "reasoningFamilies": {
+        "type": "object",
+        "description": "OpenClaw model id -> thinking level -> `devin --model` id. Overrides auto-derived families with the same id.",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "label": { "type": "string" },
+            "levels": {
+              "type": "object",
+              "propertyNames": { "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+              "additionalProperties": { "type": "string" }
+            },
+            "fastLevels": {
+              "type": "object",
+              "propertyNames": { "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+              "additionalProperties": { "type": "string" }
+            },
+            "base": { "type": "string", "description": "Variant used when no thinking level is set or the level is unmapped." },
+            "defaultLevel": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
+            "aliases": { "type": "array", "items": { "type": "string" } }
+          }
+        }
       }
     }
   }
