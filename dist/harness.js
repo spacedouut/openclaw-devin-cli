@@ -21,6 +21,12 @@ export function createDevinHarness(params) {
             if (modelProvider?.runtimePolicy && !modelProvider.runtimePolicy.compatibleIds.includes(HARNESS_ID)) {
                 return { supported: false, reason: "provider route is not compatible with Devin CLI" };
             }
+            if (modelProvider?.requestTransportOverrides === "present") {
+                return {
+                    supported: false,
+                    reason: "devin acp cannot apply authored provider headers, params or transport overrides",
+                };
+            }
             return { supported: true, priority: 100 };
         },
         runAttempt: (input) => runDevinAttempt(input, {

@@ -532,6 +532,9 @@ export async function runDevinAttempt(
         `devin CLI binary '${deps.command}' not found. Install with: curl -fsSL https://cli.devin.ai/install.sh | bash && devin auth login`,
       );
     }
+    messages = await SessionManager.openModelContextAsync(transcript, { cwd: input.workspaceDir })
+      .then((context) => context.buildSessionContext().messages)
+      .catch(() => messages);
   } finally {
     settled = true;
     clearTimeout(timer);
@@ -545,11 +548,13 @@ export async function runDevinAttempt(
   return {
     terminal: timedOut
       ? { kind: "timeout", phase: "prompt", source: "runtime", aborted: true }
-      : signal.aborted || cancelled
-        ? { kind: "aborted", source: "external" }
-        : failure
-          ? { kind: "failed", source: "prompt", error: failure }
-          : { kind: "ok" },
+      : chainError
+        ? { kind: "failed", source: "prompt", error: failure ?? chainError }
+        : signal.aborted || cancelled
+          ? { kind: "aborted", source: "external" }
+          : failure
+            ? { kind: "failed", source: "prompt", error: failure }
+            : { kind: "ok" },
     sessionIdUsed: input.sessionId,
     sessionFileUsed: input.sessionFile,
     agentHarnessId: deps.harnessId,
