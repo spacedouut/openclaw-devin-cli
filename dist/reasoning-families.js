@@ -116,7 +116,7 @@ export function mergeConfiguredFamilies(auto, configured) {
         if (Object.keys(levels).length === 0 && !raw.base)
             continue;
         const fastLevels = levelMapFromConfig(raw.fastLevels);
-        const key = id.toLowerCase();
+        const key = id.toLowerCase().replace(/\./g, "-");
         merged[key] = {
             label: raw.label ?? auto[key]?.label ?? id,
             levels,

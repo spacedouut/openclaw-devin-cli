@@ -71,11 +71,16 @@
         "additionalProperties": {
           "type": "object",
           "additionalProperties": false,
+          "anyOf": [
+            { "required": ["base"] },
+            { "required": ["levels"], "properties": { "levels": { "minProperties": 1 } } }
+          ],
           "properties": {
             "label": { "type": "string" },
             "levels": {
               "type": "object",
               "propertyNames": { "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+              "minProperties": 1,
               "additionalProperties": { "type": "string" }
             },
             "fastLevels": {
@@ -83,7 +88,7 @@
               "propertyNames": { "enum": ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] },
               "additionalProperties": { "type": "string" }
             },
-            "base": { "type": "string", "description": "Variant used when no thinking level is set or the level is unmapped." },
+            "base": { "type": "string", "minLength": 1, "description": "Variant used when no thinking level is set or the level is unmapped." },
             "defaultLevel": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
             "aliases": { "type": "array", "items": { "type": "string" } }
           }
