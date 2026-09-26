@@ -123,10 +123,8 @@ export class DevinSessionBindings {
             catch {
                 continue;
             }
-            if (this.isAbandoned(owner, mtimeMs)) {
+            if (this.isAbandoned(owner, mtimeMs))
                 this.reclaim(owner?.token);
-                continue;
-            }
             if (Date.now() > deadline)
                 throw new Error(`Timed out waiting for ${this.lock}`);
             Atomics.wait(sleeper, 0, 0, 5);
