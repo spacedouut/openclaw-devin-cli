@@ -1,14 +1,10 @@
 {
   "name": "openclaw-devin-cli",
-  "version": "0.5.0",
-  "description": "OpenClaw CLI backend plugin for Cognition Devin CLI",
+  "version": "0.6.0",
+  "description": "OpenClaw agent harness plugin for Cognition Devin CLI",
   "type": "module",
   "license": "MIT",
-  "bin": {
-    "devin-openclaw-bridge": "./bin/devin-openclaw-bridge.mjs"
-  },
   "files": [
-    "bin/",
     "dist/",
     "src/",
     "openclaw.plugin.json"

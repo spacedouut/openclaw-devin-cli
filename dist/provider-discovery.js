@@ -38,7 +38,9 @@ function rawPluginConfig(config) {
 }
 export function devinCommand(ctx) {
     const command = rawPluginConfig(ctx.config).command;
-    return typeof command === "string" && command.trim() ? command.trim() : "devin";
+    if (typeof command === "string" && command.trim())
+        return command.trim();
+    return process.env.DEVIN_OPENCLAW_COMMAND?.trim() || "devin";
 }
 /** Reasoning families in effect: auto-derived from Devin's catalog (unless
  * `autoReasoningFamilies: false`) with configured `reasoningFamilies` on top. */

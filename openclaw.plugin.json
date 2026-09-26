@@ -1,10 +1,9 @@
 {
   "id": "devin-cli",
   "name": "Devin CLI",
-  "description": "Run Cognition's Devin CLI as an OpenClaw inference backend",
+  "description": "Run Cognition's Devin CLI as a native OpenClaw agent harness",
   "categories": ["agent-runtimes"],
   "enabledByDefault": true,
-  "cliBackends": ["devin-cli"],
   "providers": ["devin-cli"],
   "syntheticAuthRefs": ["devin-cli"],
   "nonSecretAuthMarkers": ["openclaw:devin-cli-native-auth"],
@@ -37,11 +36,12 @@
     "discovery": { "devin-cli": "runtime" }
   },
   "setup": {
-    "cliBackends": ["devin-cli"],
-    "requiresRuntime": false
+      "requiresRuntime": false
   },
   "activation": {
-    "onStartup": false
+    "onStartup": false,
+    "onProviders": ["devin-cli"],
+    "onAgentHarnesses": ["devin-cli"]
   },
   "configSchema": {
     "type": "object",
@@ -54,7 +54,7 @@
       "permissionMode": {
         "type": "string",
         "enum": ["auto", "accept-edits", "smart", "dangerous"],
-        "description": "Devin CLI --permission-mode. Default: 'smart'; 'dangerous' when OpenClaw exec policy is full."
+        "description": "Devin permission mode for ACP sessions. Default: 'smart'; 'dangerous' when OpenClaw exec policy is full."
       },
       "modelAliases": {
         "type": "object",
