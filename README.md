@@ -30,17 +30,22 @@ Client Protocol server (JSON-RPC over stdio). Per turn it:
    lifecycle updates, and usage. `session/request_permission` is answered by
    the bridge (allow, except in `ask` mode), so tools never hang on a missing
    TTY.
-4. Streams the turn to stdout as JSONL in Gemini CLI's `stream-json` shape
-   (`jsonlDialect: "gemini-stream-json"`), so OpenClaw shows text deltas and
-   Devin's native tool calls live:
+4. Streams the turn to stdout as JSONL in Claude Code's `stream-json` shape
+   (`jsonlDialect: "claude-stream-json"`). Each text run plus the tool calls
+   that follow it is one assistant message and tool results are user
+   messages, so OpenClaw shows Devin's tool calls live and keeps pre-tool text
+   interleaved with them (as commentary) instead of merging all text into the
+   final reply:
 
    ```jsonl
-   {"type":"init","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
-   {"type":"message","role":"assistant","content":"I'll run it.","delta":true}
-   {"type":"tool_use","tool_id":"call_…","tool_name":"exec","parameters":{"title":"Ran uname","command":"uname -r"}}
-   {"type":"tool_result","tool_id":"call_…","status":"success","output":"6.8.0-1061-aws"}
-   {"type":"message","role":"assistant","content":"\n\nKernel is 6.8.0-1061-aws.","delta":true}
-   {"type":"result","status":"success","session_id":"quilt-bubbler","usage":{…}}
+   {"type":"system","subtype":"session","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
+   {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_1",…}}}
+   {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll run it."}}}
+   {"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_…","name":"exec","input":{"command":"uname -r"}}}}
+   {"type":"stream_event","event":{"type":"message_stop"}}
+   {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_…","content":"6.8.0-1061-aws","is_error":false}]}}
+   {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Kernel is 6.8.0-1061-aws."}}}
+   {"type":"result","subtype":"success","result":"Kernel is 6.8.0-1061-aws.","session_id":"quilt-bubbler","usage":{…}}
    ```
 
    If Devin ends a turn without any text, the bridge streams a summary of the

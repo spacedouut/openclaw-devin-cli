@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * devin-openclaw-bridge — drives Devin CLI over ACP (`devin acp`, JSON-RPC on
- * stdio) and streams the turn to OpenClaw as gemini-stream-json JSONL.
+ * stdio) and streams the turn to OpenClaw as Claude stream-json JSONL.
  *
  * `devin -p` only prints the final assistant text, so a turn that ends after a
  * tool call (or a headless permission rejection) looks like an empty success.
@@ -183,18 +183,48 @@ async function main() {
   let sessionId = opts.resume;
   let collecting = false;
   let reply = "";
-  let breakBeforeNextChunk = false;
   const tools = new Map();
   let usageMeta;
 
+  // Turns are re-emitted as Claude stream-json: each ACP text run and the tool
+  // calls that follow it form one assistant message, and tool results arrive
+  // as user messages. OpenClaw then treats pre-tool text as commentary and
+  // keeps text and tool calls interleaved in the transcript.
+  let messageSeq = 0;
+  let messageOpen = false;
+  let blockIndex = -1;
+  let textBlockOpen = false;
+  let segment = "";
+  const streamEvent = (event) => emit({ type: "stream_event", event, ...(sessionId ? { session_id: sessionId } : {}) });
+  const openMessage = () => {
+    if (messageOpen) return;
+    messageOpen = true;
+    blockIndex = -1;
+    streamEvent({ type: "message_start", message: { id: `devin_msg_${++messageSeq}`, role: "assistant", content: [] } });
+  };
+  const closeTextBlock = () => {
+    if (!textBlockOpen) return;
+    textBlockOpen = false;
+    streamEvent({ type: "content_block_stop", index: blockIndex });
+  };
+  const closeMessage = () => {
+    if (!messageOpen) return;
+    closeTextBlock();
+    messageOpen = false;
+    streamEvent({ type: "message_stop" });
+  };
   const emitText = (delta) => {
     if (!delta) return;
+    openMessage();
+    if (!textBlockOpen) {
+      textBlockOpen = true;
+      streamEvent({ type: "content_block_start", index: ++blockIndex, content_block: { type: "text", text: "" } });
+    }
     reply += delta;
-    emit({ type: "message", role: "assistant", content: delta, delta: true });
+    segment += delta;
+    streamEvent({ type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: delta } });
   };
 
-  // Tool lifecycle is streamed as gemini-stream-json tool_use/tool_result
-  // records, which OpenClaw surfaces as live tool events.
   const trackTool = (u) => {
     const prev = tools.get(u.toolCallId) ?? {};
     const output = u.sessionUpdate === "tool_call_update" ? textOf(u.content) : "";
@@ -212,12 +242,17 @@ async function main() {
       Boolean(u.status) || (u.sessionUpdate === "tool_call" && next.input && typeof next.input === "object");
     if (!prev.started && ready) {
       next.started = true;
-      emit({
-        type: "tool_use",
-        tool_id: u.toolCallId,
-        tool_name: next.name,
-        parameters: { ...(next.title ? { title: next.title } : {}), ...(next.input ?? {}) },
+      openMessage();
+      closeTextBlock();
+      segment = "";
+      const index = ++blockIndex;
+      const input = { ...(next.title ? { title: next.title } : {}), ...(next.input ?? {}) };
+      streamEvent({
+        type: "content_block_start",
+        index,
+        content_block: { type: "tool_use", id: u.toolCallId, name: next.name, input },
       });
+      streamEvent({ type: "content_block_stop", index });
     }
     if (next.started && !prev.finished && TERMINAL_TOOL_STATUS.has(next.status)) {
       next.finished = true;
@@ -225,13 +260,23 @@ async function main() {
     }
   };
   const emitToolResult = (id, t) => {
+    closeMessage();
     const failed = t.denied || t.status !== "completed";
     const message = t.denied ? "permission denied" : t.output ?? "";
     emit({
-      type: "tool_result",
-      tool_id: id,
-      status: failed ? "error" : "success",
-      ...(failed ? { error: { message: message || `tool ${t.status ?? "incomplete"}` } } : { output: message }),
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: id,
+            content: message || (failed ? `tool ${t.status ?? "incomplete"}` : ""),
+            is_error: Boolean(failed),
+          },
+        ],
+      },
+      ...(sessionId ? { session_id: sessionId } : {}),
     });
   };
 
@@ -246,16 +291,11 @@ async function main() {
           if (parent && parent !== "root") break;
           const chunk = textOf(u.content);
           if (!chunk) break;
-          if (breakBeforeNextChunk && reply && !reply.endsWith("\n\n")) {
-            emitText(reply.endsWith("\n") ? "\n" : "\n\n");
-          }
-          breakBeforeNextChunk = false;
           emitText(chunk);
           break;
         }
         case "tool_call":
         case "tool_call_update":
-          breakBeforeNextChunk = true;
           trackTool(u);
           break;
         case "usage_update":
@@ -335,7 +375,7 @@ async function main() {
       });
       sessionId = created?.sessionId;
     }
-    if (sessionId) emit({ type: "init", session_id: sessionId, model: opts.model });
+    if (sessionId) emit({ type: "system", subtype: "session", session_id: sessionId, model: opts.model });
     if (acpMode) {
       await client.request("session/set_mode", { sessionId, modeId: acpMode }).catch(() => undefined);
     }
@@ -376,7 +416,15 @@ async function main() {
       } else if (stopReason === "max_tokens" || stopReason === "max_turn_requests") {
         emitText(`\n\n[Devin stopped early: ${stopReason}]`);
       }
-      emit({ type: "result", status: "success", ...(sessionId ? { session_id: sessionId } : {}), usage });
+      closeMessage();
+      emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: segment.trim(),
+        ...(sessionId ? { session_id: sessionId } : {}),
+        usage,
+      });
     }
   } catch (err) {
     const outcome = await Promise.race([exited, new Promise((r) => setTimeout(() => r(undefined), 200))]);

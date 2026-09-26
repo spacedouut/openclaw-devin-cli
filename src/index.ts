@@ -168,9 +168,9 @@ function buildDevinCliBackend(): CliBackendPlugin {
       resumeArgs: [BRIDGE_PATH, "-r", "{sessionId}", "--oc-prompt", "{prompt}"],
       output: "jsonl",
       resumeOutput: "jsonl",
-      // The bridge re-emits ACP updates in Gemini CLI's stream-json shape so
-      // OpenClaw streams text deltas and native tool events live.
-      jsonlDialect: "gemini-stream-json",
+      // The bridge re-emits ACP updates in Claude Code's stream-json shape so
+      // OpenClaw streams tool events live and keeps pre-tool text as commentary.
+      jsonlDialect: "claude-stream-json",
       input: "arg",
       modelArg: "--model",
       modelAliases: DEVIN_MODEL_ALIASES,
