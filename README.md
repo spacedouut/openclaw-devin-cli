@@ -46,6 +46,22 @@ Per turn the harness (`src/harness-attempt.ts`):
    turn ends.
 4. If Devin ends a turn without any text, the final message is a summary of
    the stop reason and tool activity, so the turn is never empty.
+5. Root-agent `agent_thought_chunk` updates stream as OpenClaw reasoning
+   (`onReasoningStream` / `thinking` events) and are stored as `thinking`
+   blocks on the assistant message they led to. Subagent reasoning is dropped.
+6. Messages steered into an active run (`/steer`, `/queue steer`) are
+   persisted to the transcript and sent to Devin as another `session/prompt`
+   on the same session; Devin folds them into the running turn.
+7. Root-agent `usage_update`s stream as OpenClaw `usage` events (context
+   occupancy `used` / window `size`, per-call tokens) and feed the turn's
+   usage, context window and `contextUsage`.
+
+Devin's ACP stream has no compaction lifecycle. The harness infers a
+compaction when Devin's active context drops sharply between model calls
+(including across turns of a resumed session) and reports it as a completed
+`compaction` event and `compactionCount`; `isCompacting()` is only true while
+that event is being reported. OpenClaw-initiated compaction of Devin sessions
+is not supported.
 
 Devin session ids are kept per OpenClaw session in
 `<stateDir>/plugins/devin-cli/sessions.json`; OpenClaw session reset or
@@ -233,7 +249,8 @@ openclaw agent --local -m "hello" --model devin-cli/claude-opus-5-5 --thinking h
 | `src/harness.ts` | `AgentHarnessV2`: route selection, reset/deletion/dispose |
 | `src/harness-attempt.ts` | one turn: ACP session, live events, transcript writes, attempt result |
 | `src/devin-acp.ts` | `devin acp` JSON-RPC client |
-| `src/turn-projector.ts` | ACP text/tool events → typed assistant/toolResult messages |
+| `src/turn-projector.ts` | ACP text/reasoning/tool events → typed assistant/toolResult messages |
+| `src/devin-usage.ts` | ACP `usage_update` → OpenClaw usage, context window, inferred compaction |
 | `src/session-bindings.ts` | OpenClaw session → Devin session id store |
 | `src/provider-discovery.ts` | catalog entry: `devin models list` -> model catalog, static fallback |
 | `src/reasoning-families.ts` | family + thinking level → Devin variant |

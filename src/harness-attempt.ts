@@ -12,7 +12,9 @@ import {
   getPluginToolSideEffectOwnerKey,
   isMessagingToolSendAction,
   projectAgentToolActivity,
+  runAgentHarnessAfterCompactionHook,
   runAgentHarnessAfterToolCallHook,
+  runAgentHarnessBeforeCompactionHook,
   sanitizeToolResult,
   resolveAgentHarnessBeforePromptBuildResult,
   resolveBootstrapContextForRun,
@@ -39,6 +41,7 @@ import {
   type AcpSessionUpdate,
 } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
+import { DevinUsageTracker, type DevinUsageRecord } from "./devin-usage.js";
 import {
   OPENCLAW_MCP_SERVER_NAME,
   OPENCLAW_MCP_TOOL_PREFIX,
@@ -50,7 +53,6 @@ import { buildOpenClawTools, DEVIN_OVERLAPPING_TOOLS } from "./openclaw-tools.js
 import type { DevinSessionBindings } from "./session-bindings.js";
 import {
   DevinTurnProjector,
-  usageFrom,
   type AssistantMessage,
   type TranscriptWrite,
 } from "./turn-projector.js";
@@ -96,6 +98,14 @@ type ToolState = {
 };
 
 const TERMINAL_TOOL_STATUS = new Set(["completed", "failed"]);
+
+type QueueMessageOptions = Parameters<Parameters<typeof setActiveEmbeddedRun>[1]["queueMessage"]>[1];
+
+/** Devin interleaves subagent updates on the root stream; only root-agent output belongs to the turn. */
+function isRootUpdate(update: AcpSessionUpdate): boolean {
+  const parent = asRecord(update._meta?.["cognition.ai/subagent_context"]).parentAgentId;
+  return typeof parent !== "string" || parent === "root";
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -214,16 +224,61 @@ export async function runDevinAttempt(
   const messagingSentMediaUrls: string[] = [];
   const messagingSentTargets: NonNullable<AgentHarnessAttemptResult["messagingToolSentTargets"]> = [];
 
+  let usage: DevinUsageTracker | undefined;
+  let compacting = false;
+  // Devin accepts `session/prompt` while a prompt is running and folds it into the active turn.
+  let steerable = false;
+  const steeringPrompts: Promise<AcpPromptResult>[] = [];
+  const canSteer = () => steerable && !settled && !signal.aborted;
+
+  const queueMessage = async (text: string, options?: QueueMessageOptions) => {
+    let acceptanceReported = false;
+    const reportAcceptance = (accepted: boolean) => {
+      if (acceptanceReported) return;
+      acceptanceReported = true;
+      options?.onQueueAccepted?.(accepted);
+    };
+    try {
+      if (!canSteer() || !acp || !devinSessionId) {
+        throw new Error("Devin steering is unavailable outside an active prompt");
+      }
+      options?.abortSignal?.throwIfAborted();
+      const steerRecorder = options?.userTurnTranscriptRecorder;
+      if (steerRecorder) {
+        await steerRecorder.persistApproved({ expectedSessionId: input.sessionId });
+        if (steerRecorder.isBlocked() || !steerRecorder.hasPersisted()) {
+          throw new Error("Devin steering input was not admitted to its transcript");
+        }
+      }
+      if (!canSteer()) {
+        throw new Error("Devin steering is unavailable after the active prompt ended");
+      }
+      steerRecorder?.markSentToProvider?.();
+      const prompt = acp.prompt(
+        devinSessionId,
+        text,
+        (options?.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType })),
+      );
+      prompt.catch(() => undefined);
+      steeringPrompts.push(prompt);
+      reportAcceptance(true);
+    } catch (error) {
+      reportAcceptance(false);
+      throw error;
+    }
+  };
+
   const activeRun = {
     kind: "embedded" as const,
     runId: input.runId,
     toolAuthorityFingerprint: input.toolAuthorityFingerprint,
-    queueMessage: async () => {
-      throw new Error("Devin CLI does not support live message injection");
-    },
+    supportsQueueMessageImages: true,
+    supportsTranscriptCommitWait: true,
+    messageInjection: { isAvailable: canSteer, queueMessage },
+    queueMessage,
     isStreaming: () => started && !settled,
     isAborted: () => signal.aborted,
-    isCompacting: () => false,
+    isCompacting: () => compacting,
     cancel: () => controller.abort(),
     abort: () => controller.abort(),
     sourceReplyDeliveryMode: input.sourceReplyDeliveryMode,
@@ -272,6 +327,61 @@ export async function runDevinAttempt(
     });
   };
 
+  let reasoningText = "";
+  const endReasoning = async () => {
+    if (!reasoningText) return;
+    reasoningText = "";
+    await input.onReasoningEnd?.();
+  };
+
+  const onThinking = (delta: string) => {
+    if (!delta) return;
+    enqueue(async () => {
+      reasoningText += delta;
+      projector?.thinking(delta);
+      await emit("thinking", { text: reasoningText, delta });
+      assertActive();
+      await input.onReasoningStream?.({ text: reasoningText, isReasoningSnapshot: true });
+    });
+  };
+
+  const onCompacted = async (compacted: NonNullable<DevinUsageRecord["compacted"]>) => {
+    compacting = true;
+    const itemId = `${input.runId}:devin-compaction:${usage?.compactions ?? 0}`;
+    const hookCtx = { runId: input.runId, agentId, sessionId: input.sessionId, sessionKey, config: input.config };
+    try {
+      await runAgentHarnessBeforeCompactionHook({ sessionFile: input.sessionFile, messages, ctx: hookCtx });
+      await emit("compaction", { phase: "start", backend: "devin-cli", itemId });
+      await runAgentHarnessAfterCompactionHook({
+        sessionFile: input.sessionFile,
+        messages,
+        compactedCount: -1,
+        ctx: hookCtx,
+      });
+      await emit("compaction", {
+        phase: "end",
+        backend: "devin-cli",
+        itemId,
+        completed: true,
+        willRetry: false,
+        tokensBefore: compacted.tokensBefore,
+        tokensAfter: compacted.tokensAfter,
+      });
+    } finally {
+      compacting = false;
+    }
+  };
+
+  const onUsage = (update: AcpSessionUpdate) => {
+    const recorded = usage?.record(update);
+    if (!recorded) return;
+    enqueue(async () => {
+      if (recorded.compacted) await onCompacted(recorded.compacted);
+      await emit("usage", recorded.snapshot);
+      if (recorded.outputTokens > 0) input.hostCapabilities.reportOutputTokens?.(recorded.outputTokens);
+    });
+  };
+
   const writeGroups = async (groups: TranscriptWrite[][]) => {
     for (const group of groups) {
       assertActive();
@@ -291,6 +401,7 @@ export async function runDevinAttempt(
 
   const onText = (delta: string) => {
     enqueue(async () => {
+      await endReasoning();
       if (!liveSegmentOpen) {
         liveSegmentOpen = true;
         liveSegment += 1;
@@ -343,6 +454,7 @@ export async function runDevinAttempt(
       next.started = true;
       const args = { ...(next.title ? { title: next.title } : {}), ...next.args };
       enqueue(async () => {
+        await endReasoning();
         await closeLiveSegment();
         projector?.toolStart({ id, name: next.name, args });
         const toolData = { phase: "start" as const, name: next.name, toolCallId: id, args };
@@ -508,13 +620,15 @@ export async function runDevinAttempt(
         onUpdate: (sessionId, update) => {
           if (!started || sessionId !== devinSessionId || signal.aborted) return;
           switch (update.sessionUpdate) {
-            case "agent_message_chunk": {
-              const context = asRecord(update._meta?.["cognition.ai/subagent_context"]);
-              const parent = context.parentAgentId;
-              if (typeof parent === "string" && parent !== "root") break;
-              onText(acpText(update.content));
+            case "agent_message_chunk":
+              if (isRootUpdate(update)) onText(acpText(update.content));
               break;
-            }
+            case "agent_thought_chunk":
+              if (isRootUpdate(update)) onThinking(acpText(update.content));
+              break;
+            case "usage_update":
+              if (isRootUpdate(update)) onUsage(update);
+              break;
             case "tool_call":
             case "tool_call_update":
               onToolUpdate(update);
@@ -565,10 +679,12 @@ export async function runDevinAttempt(
       devinSessionId = await acp.newSession(cwd, mcpServers);
     }
     assertActive();
+    usage = new DevinUsageTracker(resumed ? binding?.contextTokens : undefined);
     deps.bindings.set(input.sessionId, {
       devinSessionId,
       cwd,
       sessionKey,
+      ...(resumed && binding?.contextTokens !== undefined ? { contextTokens: binding.contextTokens } : {}),
       updatedAt: Date.now(),
     });
     await acp.setMode(devinSessionId, acpMode).catch(() => undefined);
@@ -626,16 +742,27 @@ export async function runDevinAttempt(
     started = true;
     recorder.markSentToProvider?.();
     input.onExecutionStarted?.();
-    const result: AcpPromptResult = await acp.prompt(
-      devinSessionId,
-      promptText,
-      (input.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType })),
-    );
+    steerable = true;
+    let result: AcpPromptResult;
+    try {
+      result = await acp.prompt(
+        devinSessionId,
+        promptText,
+        (input.images ?? []).map((image) => ({ data: image.data, mimeType: image.mimeType })),
+      );
+    } finally {
+      steerable = false;
+    }
+    for (let index = 0; index < steeringPrompts.length; index += 1) {
+      const steered = await steeringPrompts[index]!.catch(() => undefined);
+      if (steered?.stopReason) result = steered;
+    }
     for (const tool of tools.values()) {
       if (tool.started && !tool.finished) finishTool(tool);
     }
     await chain;
     if (chainError) throw chainError;
+    await endReasoning();
     assertActive();
 
     const stopReason = result?.stopReason ?? "end_turn";
@@ -643,7 +770,7 @@ export async function runDevinAttempt(
     const denied = [...tools.values()].some((tool) => tool.denied);
     const finished = projector.finish({
       stopReason: cancelled ? "aborted" : stopReason === "refusal" ? "error" : "stop",
-      usage: usageFrom(result?.usage),
+      usage: usage.turnUsage(result?.usage),
       fallbackText: () => {
         if (denied) return "Devin could not complete this turn because permission was not granted.";
         const summary = summarizeTools(tools.values());
@@ -660,7 +787,9 @@ export async function runDevinAttempt(
       }
       const message = {
         ...finished.final.message,
-        content: [{ type: "text" as const, text }],
+        content: finished.final.message.content.map((block) =>
+          block.type === "text" ? { ...block, text } : block,
+        ),
       } as AssistantMessage;
       if (!liveSegmentOpen || text !== liveText) {
         // Tool-only turns and appended notes were never streamed.
@@ -694,6 +823,15 @@ export async function runDevinAttempt(
         ...(terminalAnchor ? { through: terminalAnchor } : {}),
       })
     ).buildSessionContext().messages;
+    if (usage.contextTokens !== undefined) {
+      deps.bindings.set(input.sessionId, {
+        devinSessionId,
+        cwd,
+        sessionKey,
+        contextTokens: usage.contextTokens,
+        updatedAt: Date.now(),
+      });
+    }
     if (stopReason === "refusal") {
       failure = new Error(finished.finalText || "Devin refused this request.");
     }
@@ -711,6 +849,8 @@ export async function runDevinAttempt(
       .catch(() => messages);
   } finally {
     settled = true;
+    steerable = false;
+    compacting = false;
     clearTimeout(timer);
     await acp?.close(devinSessionId).catch(() => undefined);
     await bridge?.close().catch(() => undefined);
@@ -720,6 +860,22 @@ export async function runDevinAttempt(
   }
 
   const toolCount = toolMetas.length;
+  const turnUsage = finalAssistant?.usage as ReturnType<DevinUsageTracker["turnUsage"]> | undefined;
+  const attemptUsage = turnUsage
+    ? {
+        input: turnUsage.input,
+        output: turnUsage.output,
+        cacheRead: turnUsage.cacheRead,
+        cacheWrite: turnUsage.cacheWrite,
+        total: turnUsage.totalTokens,
+        ...(turnUsage.contextUsage
+          ? {
+              contextUsage:
+                signal.aborted || cancelled ? ({ state: "unavailable" } as const) : turnUsage.contextUsage,
+            }
+          : {}),
+      }
+    : undefined;
   return {
     terminal: timedOut
       ? { kind: "timeout", phase: "prompt", source: "runtime", aborted: true }
@@ -750,6 +906,9 @@ export async function runDevinAttempt(
     messagingToolSentMediaUrls: messagingSentMediaUrls,
     messagingToolSentTargets: messagingSentTargets,
     cloudCodeAssistFormatError: false,
+    ...(attemptUsage ? { attemptUsage } : {}),
+    ...(usage?.contextWindow ? { contextTokens: usage.contextWindow, contextTokensSource: "runtime" } : {}),
+    ...(usage && usage.compactions > 0 ? { compactionCount: usage.compactions } : {}),
     replayMetadata: { hadPotentialSideEffects: toolCount > 0, replaySafe: !started },
     itemLifecycle: {
       startedCount: toolCount,

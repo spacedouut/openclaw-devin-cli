@@ -9,6 +9,8 @@ export type DevinSessionBinding = {
   devinSessionId: string;
   cwd: string;
   sessionKey?: string;
+  /** Devin's active context size after the last completed turn. */
+  contextTokens?: number;
   updatedAt: number;
 };
 

@@ -6,24 +6,26 @@ const ZERO_USAGE = {
     totalTokens: 0,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+/** Devin's `inputTokens` include cached input; OpenClaw counts uncached input separately. */
 export function usageFrom(usage) {
-    const input = usage?.inputTokens ?? 0;
+    const promptTokens = usage?.inputTokens ?? 0;
     const output = usage?.outputTokens ?? 0;
     const cacheRead = usage?.cachedReadTokens ?? 0;
     const cacheWrite = usage?.cachedWriteTokens ?? 0;
     return {
         ...ZERO_USAGE,
-        input,
+        input: Math.max(0, promptTokens - cacheRead - cacheWrite),
         output,
         cacheRead,
         cacheWrite,
-        totalTokens: usage?.totalTokens ?? input + output + cacheRead + cacheWrite,
+        totalTokens: usage?.totalTokens ?? promptTokens + output,
         cost: { ...ZERO_USAGE.cost },
     };
 }
 export class DevinTurnProjector {
     params;
     current = newSegment();
+    deferredThinking = "";
     deferredText = "";
     deferredItemId;
     deferredStartedAt;
@@ -51,6 +53,19 @@ export class DevinTurnProjector {
         else {
             this.current.text += delta;
             this.current.itemId ??= itemId;
+            this.current.startedAt ??= this.now();
+        }
+    }
+    /** Appends Devin reasoning to the segment that its following text/tools belong to. */
+    thinking(delta) {
+        if (!delta)
+            return;
+        if (this.current.tools.length > 0) {
+            this.deferredThinking += delta;
+            this.deferredStartedAt ??= this.now();
+        }
+        else {
+            this.current.thinking += delta;
             this.current.startedAt ??= this.now();
         }
     }
@@ -84,6 +99,8 @@ export class DevinTurnProjector {
         const seq = ++this.groupSeq;
         const { modelRef, keyPrefix } = this.params;
         const content = [];
+        if (segment.thinking)
+            content.push({ type: "thinking", thinking: segment.thinking });
         if (segment.text) {
             content.push({
                 type: "text",
@@ -114,7 +131,8 @@ export class DevinTurnProjector {
                 message: this.withRun(segment.results.get(tool.id)),
             })),
         ]);
-        this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt);
+        this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt, this.deferredThinking);
+        this.deferredThinking = "";
         this.deferredText = "";
         this.deferredItemId = undefined;
         this.deferredStartedAt = undefined;
@@ -136,6 +154,7 @@ export class DevinTurnProjector {
             this.toolEnd({ id: tool.id, name: tool.name, output: "tool did not report a result", isError: true });
         }
         let text = this.current.text + this.deferredText;
+        const thinking = this.current.thinking + this.deferredThinking;
         if (!text.trim()) {
             text = params.fallbackText?.({ unresolved: 0 }) ?? "";
         }
@@ -150,7 +169,7 @@ export class DevinTurnProjector {
             provider: modelRef.provider,
             model: modelRef.model,
             api: modelRef.api,
-            content: [{ type: "text", text }],
+            content: [...(thinking ? [{ type: "thinking", thinking }] : []), { type: "text", text }],
             stopReason: params.stopReason,
             timestamp: this.now(),
             usage: params.usage,
@@ -161,8 +180,9 @@ export class DevinTurnProjector {
         return [...this.segmentTexts];
     }
 }
-function newSegment(text = "", itemId, startedAt) {
+function newSegment(text = "", itemId, startedAt, thinking = "") {
     return {
+        thinking,
         text,
         ...(itemId ? { itemId } : {}),
         ...(startedAt !== undefined ? { startedAt } : {}),

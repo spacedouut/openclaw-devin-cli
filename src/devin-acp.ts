@@ -45,6 +45,8 @@ export type AcpSessionUpdate = {
   status?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
+  used?: number;
+  size?: number;
   _meta?: Record<string, unknown>;
 };
 

@@ -17,6 +17,7 @@ export type ModelRef = { provider: string; model: string; api: string };
 
 type ToolCall = { id: string; name: string; args: Record<string, unknown> };
 type Segment = {
+  thinking: string;
   text: string;
   itemId?: string;
   startedAt?: number;
@@ -33,8 +34,11 @@ const ZERO_USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-export type TurnUsage = typeof ZERO_USAGE;
+export type TurnUsage = typeof ZERO_USAGE & {
+  contextUsage?: { state: "available"; promptTokens: number; totalTokens: number } | { state: "unavailable" };
+};
 
+/** Devin's `inputTokens` include cached input; OpenClaw counts uncached input separately. */
 export function usageFrom(usage?: {
   inputTokens?: number;
   outputTokens?: number;
@@ -42,23 +46,24 @@ export function usageFrom(usage?: {
   cachedWriteTokens?: number;
   totalTokens?: number;
 }): TurnUsage {
-  const input = usage?.inputTokens ?? 0;
+  const promptTokens = usage?.inputTokens ?? 0;
   const output = usage?.outputTokens ?? 0;
   const cacheRead = usage?.cachedReadTokens ?? 0;
   const cacheWrite = usage?.cachedWriteTokens ?? 0;
   return {
     ...ZERO_USAGE,
-    input,
+    input: Math.max(0, promptTokens - cacheRead - cacheWrite),
     output,
     cacheRead,
     cacheWrite,
-    totalTokens: usage?.totalTokens ?? input + output + cacheRead + cacheWrite,
+    totalTokens: usage?.totalTokens ?? promptTokens + output,
     cost: { ...ZERO_USAGE.cost },
   };
 }
 
 export class DevinTurnProjector {
   private current: Segment = newSegment();
+  private deferredThinking = "";
   private deferredText = "";
   private deferredItemId: string | undefined;
   private deferredStartedAt: number | undefined;
@@ -96,6 +101,18 @@ export class DevinTurnProjector {
     }
   }
 
+  /** Appends Devin reasoning to the segment that its following text/tools belong to. */
+  thinking(delta: string): void {
+    if (!delta) return;
+    if (this.current.tools.length > 0) {
+      this.deferredThinking += delta;
+      this.deferredStartedAt ??= this.now();
+    } else {
+      this.current.thinking += delta;
+      this.current.startedAt ??= this.now();
+    }
+  }
+
   private withRun<T extends AssistantMessage | ToolResultMessage>(message: T): T {
     const { runId } = this.params;
     return (runId ? { ...message, __openclaw: { runId } } : message) as T;
@@ -127,6 +144,7 @@ export class DevinTurnProjector {
     const seq = ++this.groupSeq;
     const { modelRef, keyPrefix } = this.params;
     const content: AssistantMessage["content"] = [];
+    if (segment.thinking) content.push({ type: "thinking", thinking: segment.thinking });
     if (segment.text) {
       content.push({
         type: "text",
@@ -157,7 +175,13 @@ export class DevinTurnProjector {
         message: this.withRun(segment.results.get(tool.id)!),
       })),
     ]);
-    this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt);
+    this.current = newSegment(
+      this.deferredText,
+      this.deferredItemId,
+      this.deferredStartedAt,
+      this.deferredThinking,
+    );
+    this.deferredThinking = "";
     this.deferredText = "";
     this.deferredItemId = undefined;
     this.deferredStartedAt = undefined;
@@ -186,6 +210,7 @@ export class DevinTurnProjector {
       this.toolEnd({ id: tool.id, name: tool.name, output: "tool did not report a result", isError: true });
     }
     let text = this.current.text + this.deferredText;
+    const thinking = this.current.thinking + this.deferredThinking;
     if (!text.trim()) {
       text = params.fallbackText?.({ unresolved: 0 }) ?? "";
     }
@@ -200,7 +225,7 @@ export class DevinTurnProjector {
       provider: modelRef.provider,
       model: modelRef.model,
       api: modelRef.api,
-      content: [{ type: "text", text }],
+      content: [...(thinking ? [{ type: "thinking", thinking }] : []), { type: "text", text }],
       stopReason: params.stopReason,
       timestamp: this.now(),
       usage: params.usage,
@@ -213,8 +238,9 @@ export class DevinTurnProjector {
   }
 }
 
-function newSegment(text = "", itemId?: string, startedAt?: number): Segment {
+function newSegment(text = "", itemId?: string, startedAt?: number, thinking = ""): Segment {
   return {
+    thinking,
     text,
     ...(itemId ? { itemId } : {}),
     ...(startedAt !== undefined ? { startedAt } : {}),

@@ -103,3 +103,28 @@ test("tool-call rows are stamped when their segment started, not when results ar
   assert.equal(assistant.message.timestamp, 10);
   assert.equal(result.message.timestamp, 30);
 });
+
+test("persists reasoning as thinking blocks ahead of the text and tools it led to", () => {
+  const p = projector();
+  const writes = [];
+  p.thinking("Need the ");
+  p.thinking("kernel.");
+  p.text("Checking.");
+  p.toolStart({ id: "t1", name: "exec", args: {} });
+  p.thinking("Now summarize.");
+  p.toolEnd({ id: "t1", name: "exec", output: "7.0", isError: false });
+  writes.push(...p.takeReadyGroups().flat());
+  p.text("Kernel 7.0.");
+  const done = p.finish({ stopReason: "stop", usage: usageFrom() });
+  writes.push(done.final);
+  assert.deepEqual(writes[0].message.content, [
+    { type: "thinking", thinking: "Need the kernel." },
+    { type: "text", text: "Checking." },
+    { type: "toolCall", id: "t1", name: "exec", arguments: {} },
+  ]);
+  assert.deepEqual(done.final.message.content, [
+    { type: "thinking", thinking: "Now summarize." },
+    { type: "text", text: "Kernel 7.0." },
+  ]);
+  assert.equal(done.finalText, "Kernel 7.0.");
+});
