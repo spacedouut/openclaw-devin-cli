@@ -8,7 +8,7 @@ import type {
   AgentHarnessSessionDeletionMutation,
   AgentHarnessV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
-import { runDevinAttempt, type DevinAttemptDeps } from "./harness-attempt.js";
+import { runDevinAttempt, type DevinAttemptDeps, type DevinToolSurface } from "./harness-attempt.js";
 import { DevinSessionBindings } from "./session-bindings.js";
 
 export const HARNESS_ID = "devin-cli";
@@ -19,6 +19,7 @@ export function createDevinHarness(params: {
   command: () => string;
   resolveModel: DevinAttemptDeps["resolveModel"];
   resolvePermissionMode: DevinAttemptDeps["resolvePermissionMode"];
+  resolveToolSurface: (input: Parameters<DevinAttemptDeps["resolveModel"]>[0]) => DevinToolSurface;
   logger?: DevinAttemptDeps["logger"];
 }): AgentHarnessV2 {
   const generation = new AbortController();
@@ -53,6 +54,8 @@ export function createDevinHarness(params: {
       runDevinAttempt(input, {
         harnessId: HARNESS_ID,
         command: params.command(),
+        stateDir: params.stateDir(),
+        toolSurface: params.resolveToolSurface(input),
         bindings: store(),
         generationSignal: generation.signal,
         resolveModel: params.resolveModel,

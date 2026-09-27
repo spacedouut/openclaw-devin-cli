@@ -107,6 +107,11 @@ export function pickPermissionOption(
   return undefined;
 }
 
+/** ACP `McpServer` entries Devin connects to for a session. */
+export type AcpMcpServer =
+  | { type: "http"; name: string; url: string; headers: { name: string; value: string }[] }
+  | { name: string; command: string; args: string[]; env: { name: string; value: string }[] };
+
 export type DevinAcpHandlers = {
   onUpdate: (sessionId: string, update: AcpSessionUpdate) => void;
   onPermission: (request: AcpPermissionRequest) => Promise<AcpPermissionOutcome>;
@@ -126,10 +131,15 @@ export class DevinAcpProcess {
 
   constructor(
     readonly command: string,
-    params: { cwd: string; model?: string; env?: NodeJS.ProcessEnv },
+    params: { cwd: string; model?: string; configPath?: string; env?: NodeJS.ProcessEnv },
     private readonly handlers: DevinAcpHandlers,
   ) {
-    this.child = spawn(command, ["acp", ...(params.model ? ["--model", params.model] : [])], {
+    const args = [
+      ...(params.configPath ? ["--config", params.configPath] : []),
+      "acp",
+      ...(params.model ? ["--model", params.model] : []),
+    ];
+    this.child = spawn(command, args, {
       cwd: params.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
@@ -259,10 +269,10 @@ export class DevinAcpProcess {
     });
   }
 
-  async newSession(cwd: string): Promise<string> {
+  async newSession(cwd: string, mcpServers: AcpMcpServer[] = []): Promise<string> {
     const created = await this.request<{ sessionId?: string }>("session/new", {
       cwd,
-      mcpServers: [],
+      mcpServers,
       _meta: { "cognition.ai/promptForEdits": true },
     });
     if (!created?.sessionId) {
@@ -271,8 +281,8 @@ export class DevinAcpProcess {
     return created.sessionId;
   }
 
-  async loadSession(sessionId: string, cwd: string): Promise<void> {
-    await this.request("session/load", { sessionId, cwd, mcpServers: [] });
+  async loadSession(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = []): Promise<void> {
+    await this.request("session/load", { sessionId, cwd, mcpServers });
   }
 
   async setModel(sessionId: string, model: string): Promise<void> {

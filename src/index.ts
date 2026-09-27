@@ -18,6 +18,7 @@ import { resolveExecModePolicy } from "openclaw/plugin-sdk/exec-approvals-runtim
 import { resolveAgentConfig } from "openclaw/plugin-sdk/agent-scope-runtime";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
 import { createDevinHarness } from "./harness.js";
+import type { DevinToolSurface } from "./harness-attempt.js";
 import {
   devinCliCatalog,
   devinCommand,
@@ -40,6 +41,8 @@ const PROVIDER_ID = "devin-cli";
 type DevinCliPluginConfig = {
   /** devin binary name or absolute path (default "devin" on PATH). */
   command?: string;
+  /** Tools Devin gets: OpenClaw's over MCP (default), both, or Devin's own. */
+  tools?: DevinToolSurface;
   /** Devin CLI --permission-mode override. */
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
   /** Extra/override OpenClaw model ids -> `devin --model` ids. */
@@ -179,6 +182,7 @@ export default definePluginEntry({
         command: () => devinCommand({ config: api.config }),
         resolveModel: resolveDevinModel,
         resolvePermissionMode: (input) => resolvePermissionMode(input.config, input.agentId),
+        resolveToolSurface: (input) => pluginConfig(input.config).tools ?? "openclaw",
         logger: api.logger,
       }),
     );

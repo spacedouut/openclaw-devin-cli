@@ -5,12 +5,15 @@
  * result is appended as its own typed message while the turn streams, and the
  * matching live `item`/`tool` events are emitted with paired tool-call ids.
  */
-import { clearActiveEmbeddedRun, emitAgentEvent, projectAgentToolActivity, resolveAgentHarnessBeforePromptBuildResult, resolveBootstrapContextForRun, setActiveEmbeddedRun, } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { clearActiveEmbeddedRun, emitAgentEvent, extractMessagingToolSend, getPluginToolSideEffectOwnerKey, isMessagingToolSendAction, projectAgentToolActivity, runAgentHarnessAfterToolCallHook, sanitizeToolResult, resolveAgentHarnessBeforePromptBuildResult, resolveBootstrapContextForRun, setActiveEmbeddedRun, } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { appendSessionTranscriptMessageByIdentityStrict, appendSessionTranscriptMessagesByIdentity, publishSessionTranscriptUpdateByIdentity, } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { randomUUID } from "node:crypto";
 import { ACP_MODES, acpText, DevinAcpProcess, pickPermissionOption, } from "./devin-acp.js";
+import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
+import { OPENCLAW_MCP_SERVER_NAME, OPENCLAW_MCP_TOOL_PREFIX, startOpenClawMcpBridge, } from "./openclaw-mcp-server.js";
+import { buildOpenClawTools, DEVIN_OVERLAPPING_TOOLS } from "./openclaw-tools.js";
 import { DevinTurnProjector, usageFrom, } from "./turn-projector.js";
 const TERMINAL_TOOL_STATUS = new Set(["completed", "failed"]);
 function asRecord(value) {
@@ -18,9 +21,32 @@ function asRecord(value) {
         ? value
         : {};
 }
+function devinToolName(update) {
+    const named = update._meta?.["cognition.ai/toolName"] ?? update._meta?.["cognition.ai/inferenceToolName"];
+    return typeof named === "string" ? named : undefined;
+}
+/** Devin first reports MCP calls as `mcp_call_tool`, then renames them to `mcp__<server>__<tool>`. */
 function toolNameFor(update, previous) {
-    const inferred = update._meta?.["cognition.ai/inferenceToolName"];
-    return previous?.name ?? (typeof inferred === "string" ? inferred : undefined) ?? update.kind ?? "tool";
+    if (previous?.started)
+        return previous.name;
+    const named = devinToolName(update);
+    if (named?.startsWith(OPENCLAW_MCP_TOOL_PREFIX))
+        return named.slice(OPENCLAW_MCP_TOOL_PREFIX.length);
+    return previous?.name ?? named ?? update.kind ?? "tool";
+}
+function isOpenClawDiscovery(name, args) {
+    return ((name === "mcp_list_tools" || name === "mcp_read_resource") &&
+        args.server_name === OPENCLAW_MCP_SERVER_NAME);
+}
+function openClawToolsNote(surface, toolNames) {
+    const lines = [
+        `OpenClaw tools are served by the \`${OPENCLAW_MCP_SERVER_NAME}\` MCP server: ${toolNames.join(", ")}.`,
+        `Load them once with mcp_list_tools (server_name "${OPENCLAW_MCP_SERVER_NAME}"), then call them directly.`,
+    ];
+    if (surface === "openclaw") {
+        lines.push("Devin's built-in shell, file and web tools are disabled in this runtime; use the OpenClaw tools instead.");
+    }
+    return lines.join("\n");
 }
 function summarizeTools(tools) {
     return [...tools]
@@ -91,6 +117,11 @@ export async function runDevinAttempt(input, deps) {
     let assistantTexts = [];
     const tools = new Map();
     const toolMetas = [];
+    let bridge;
+    const openClawCallIds = new Map();
+    const messagingSentTexts = [];
+    const messagingSentMediaUrls = [];
+    const messagingSentTargets = [];
     const activeRun = {
         kind: "embedded",
         runId: input.runId,
@@ -186,20 +217,30 @@ export async function runDevinAttempt(input, deps) {
             return;
         const previous = tools.get(id);
         const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
+        const name = toolNameFor(update, previous);
+        const args = update.rawInput && typeof update.rawInput === "object" ? asRecord(update.rawInput) : (previous?.args ?? {});
+        const openclaw = previous?.openclaw || (!previous?.started && Boolean(devinToolName(update)?.startsWith(OPENCLAW_MCP_TOOL_PREFIX)));
+        if (openclaw && !previous?.openclaw) {
+            openClawCallIds.set(name, [...(openClawCallIds.get(name) ?? []), id]);
+        }
         const next = {
             id,
-            name: toolNameFor(update, previous),
+            name,
             title: update.title ?? previous?.title,
             kind: update.kind ?? previous?.kind,
-            args: update.rawInput && typeof update.rawInput === "object" ? asRecord(update.rawInput) : (previous?.args ?? {}),
+            args,
             status: update.status ?? previous?.status,
             output: output || previous?.output || "",
             started: previous?.started ?? false,
             finished: previous?.finished ?? false,
             denied: previous?.denied ?? false,
+            openclaw,
+            hidden: previous?.hidden || (!previous?.started && isOpenClawDiscovery(name, args)),
             startedAt: previous?.startedAt ?? Date.now(),
         };
         tools.set(id, next);
+        if (next.hidden)
+            return;
         const ready = Boolean(update.status) ||
             (update.sessionUpdate === "tool_call" && Object.keys(next.args).length > 0);
         if (!next.started && ready) {
@@ -245,6 +286,66 @@ export async function runDevinAttempt(input, deps) {
             await writeGroups(projector?.takeReadyGroups() ?? []);
         });
     };
+    const claimToolCallId = (toolName) => {
+        const queued = openClawCallIds.get(toolName);
+        return queued?.shift() ?? `${input.runId}:openclaw-tool:${randomUUID()}`;
+    };
+    const onOpenClawToolCompleted = async (completion) => {
+        const { tool, toolCallId, args, isError, error } = completion;
+        const ownerKey = getPluginToolSideEffectOwnerKey(tool);
+        input.observeToolTerminal?.({
+            toolCallId,
+            toolName: tool.name,
+            result: completion.result ?? error,
+            arguments: args,
+            executionStarted: true,
+            outcome: isError ? "failure" : "success",
+            ...(isError ? { failure: { error: error ?? "tool returned an error" } } : {}),
+            ...(ownerKey ? { ownerMutation: { ownerKey } } : {}),
+        });
+        try {
+            input.onAgentToolResult?.({
+                toolName: tool.name,
+                result: sanitizeToolResult(completion.result ?? { content: [{ type: "text", text: error ?? "" }] }),
+                isError,
+            });
+        }
+        catch (callbackError) {
+            deps.logger?.warn?.(`devin-cli: onAgentToolResult failed (${String(callbackError)})`);
+        }
+        if (!isError && isMessagingToolSendAction(tool.name, args)) {
+            const send = extractMessagingToolSend(tool.name, args, {
+                config: input.config,
+                currentChannelId: input.currentChannelId,
+                currentMessagingTarget: input.currentMessagingTarget,
+                currentThreadId: input.currentThreadTs,
+                currentMessageId: input.currentMessageId,
+                replyToMode: input.replyToMode,
+                hasRepliedRef: input.hasRepliedRef,
+            });
+            if (send) {
+                if (send.text)
+                    messagingSentTexts.push(send.text);
+                if (send.mediaUrls)
+                    messagingSentMediaUrls.push(...send.mediaUrls);
+                messagingSentTargets.push(send);
+            }
+        }
+        await runAgentHarnessAfterToolCallHook({
+            toolName: tool.name,
+            toolCallId,
+            runId: input.runId,
+            agentId,
+            sessionId: input.sessionId,
+            sessionKey,
+            startArgs: args,
+            ...(completion.result !== undefined ? { result: completion.result } : {}),
+            ...(error ? { error } : {}),
+            startedAt: completion.startedAt,
+        }).catch((hookError) => {
+            deps.logger?.warn?.(`devin-cli: after_tool_call hook failed (${String(hookError)})`);
+        });
+    };
     assertActive();
     try {
         setActiveEmbeddedRun(input.sessionId, activeRun, sessionKey, input.sessionFile, agentId);
@@ -277,7 +378,25 @@ export async function runDevinAttempt(input, deps) {
         const requestId = `${admission.entryId}:devin:${randomUUID()}`;
         projector = new DevinTurnProjector({ modelRef, keyPrefix: requestId });
         const cwd = input.workspaceDir;
-        acp = new DevinAcpProcess(deps.command, { cwd, model }, {
+        const mcpServers = [];
+        if (deps.toolSurface !== "devin") {
+            const openClawTools = buildOpenClawTools(input, {
+                agentId,
+                ...(deps.toolSurface === "both" ? { exclude: DEVIN_OVERLAPPING_TOOLS } : {}),
+            });
+            if (openClawTools.length > 0) {
+                bridge = await startOpenClawMcpBridge({
+                    tools: openClawTools,
+                    signal,
+                    claimToolCallId,
+                    onCompleted: onOpenClawToolCompleted,
+                });
+                mcpServers.push(bridge.server);
+            }
+            assertActive();
+        }
+        const configPath = deps.toolSurface === "openclaw" ? writeOpenClawOnlyDevinConfig({ stateDir: deps.stateDir }) : undefined;
+        acp = new DevinAcpProcess(deps.command, { cwd, model, configPath }, {
             onUpdate: (sessionId, update) => {
                 if (!started || sessionId !== devinSessionId || signal.aborted)
                     return;
@@ -301,6 +420,11 @@ export async function runDevinAttempt(input, deps) {
             onPermission: async (request) => {
                 input.hostCapabilities.assertActive();
                 const id = request.toolCall?.toolCallId;
+                if (id && tools.get(id)?.openclaw) {
+                    const option = pickPermissionOption(request.options, true);
+                    if (option)
+                        return { outcome: { outcome: "selected", optionId: option.optionId } };
+                }
                 if (id && !allowPermissions) {
                     const tool = tools.get(id);
                     if (tool)
@@ -322,7 +446,7 @@ export async function runDevinAttempt(input, deps) {
         let resumed = false;
         if (binding) {
             try {
-                await acp.loadSession(binding.devinSessionId, cwd);
+                await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
                 devinSessionId = binding.devinSessionId;
                 resumed = true;
                 if (model)
@@ -333,7 +457,7 @@ export async function runDevinAttempt(input, deps) {
             }
         }
         if (!devinSessionId) {
-            devinSessionId = await acp.newSession(cwd);
+            devinSessionId = await acp.newSession(cwd, mcpServers);
         }
         assertActive();
         deps.bindings.set(input.sessionId, {
@@ -364,6 +488,7 @@ export async function runDevinAttempt(input, deps) {
             developerInstructions: [
                 ...(bootstrap?.contextFiles.map((file) => `${file.path}\n${file.content}`) ?? []),
                 input.extraSystemPrompt,
+                bridge ? openClawToolsNote(deps.toolSurface, bridge.toolNames) : undefined,
             ]
                 .filter(Boolean)
                 .join("\n\n"),
@@ -478,6 +603,7 @@ export async function runDevinAttempt(input, deps) {
         settled = true;
         clearTimeout(timer);
         await acp?.close(devinSessionId).catch(() => undefined);
+        await bridge?.close().catch(() => undefined);
         if (activeRegistered) {
             clearActiveEmbeddedRun(input.sessionId, activeRun, sessionKey, input.sessionFile);
         }
@@ -508,10 +634,10 @@ export async function runDevinAttempt(input, deps) {
             }
             : {}),
         toolMetas,
-        didSendViaMessagingTool: false,
-        messagingToolSentTexts: [],
-        messagingToolSentMediaUrls: [],
-        messagingToolSentTargets: [],
+        didSendViaMessagingTool: messagingSentTargets.length > 0,
+        messagingToolSentTexts: messagingSentTexts,
+        messagingToolSentMediaUrls: messagingSentMediaUrls,
+        messagingToolSentTargets: messagingSentTargets,
         cloudCodeAssistFormatError: false,
         replayMetadata: { hadPotentialSideEffects: toolCount > 0, replaySafe: !started },
         itemLifecycle: {

@@ -66,7 +66,12 @@ export class DevinAcpProcess {
     constructor(command, params, handlers) {
         this.command = command;
         this.handlers = handlers;
-        this.child = spawn(command, ["acp", ...(params.model ? ["--model", params.model] : [])], {
+        const args = [
+            ...(params.configPath ? ["--config", params.configPath] : []),
+            "acp",
+            ...(params.model ? ["--model", params.model] : []),
+        ];
+        this.child = spawn(command, args, {
             cwd: params.cwd,
             stdio: ["pipe", "pipe", "pipe"],
             env: {
@@ -188,10 +193,10 @@ export class DevinAcpProcess {
             clientInfo: { name: "devin-cli", version: DEVIN_CLIENT_VERSION },
         });
     }
-    async newSession(cwd) {
+    async newSession(cwd, mcpServers = []) {
         const created = await this.request("session/new", {
             cwd,
-            mcpServers: [],
+            mcpServers,
             _meta: { "cognition.ai/promptForEdits": true },
         });
         if (!created?.sessionId) {
@@ -199,8 +204,8 @@ export class DevinAcpProcess {
         }
         return created.sessionId;
     }
-    async loadSession(sessionId, cwd) {
-        await this.request("session/load", { sessionId, cwd, mcpServers: [] });
+    async loadSession(sessionId, cwd, mcpServers = []) {
+        await this.request("session/load", { sessionId, cwd, mcpServers });
     }
     async setModel(sessionId, model) {
         await this.request("session/set_config_option", { sessionId, configId: "model", value: model });

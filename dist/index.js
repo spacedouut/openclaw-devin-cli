@@ -133,6 +133,7 @@ export default definePluginEntry({
             command: () => devinCommand({ config: api.config }),
             resolveModel: resolveDevinModel,
             resolvePermissionMode: (input) => resolvePermissionMode(input.config, input.agentId),
+            resolveToolSurface: (input) => pluginConfig(input.config).tools ?? "openclaw",
             logger: api.logger,
         }));
     },

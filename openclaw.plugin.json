@@ -51,6 +51,11 @@
         "type": "string",
         "description": "devin binary name or absolute path (default: 'devin' resolved on PATH)"
       },
+      "tools": {
+        "type": "string",
+        "enum": ["openclaw", "both", "devin"],
+        "description": "Tools Devin can use. 'openclaw' (default): OpenClaw's tools over MCP with Devin's built-in tools disabled. 'both': Devin's built-in tools plus OpenClaw tools that don't duplicate them. 'devin': Devin's built-in tools only."
+      },
       "permissionMode": {
         "type": "string",
         "enum": ["auto", "accept-edits", "smart", "dangerous"],

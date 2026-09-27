@@ -32,6 +32,8 @@ export function createDevinHarness(params) {
         runAttempt: (input) => runDevinAttempt(input, {
             harnessId: HARNESS_ID,
             command: params.command(),
+            stateDir: params.stateDir(),
+            toolSurface: params.resolveToolSurface(input),
             bindings: store(),
             generationSignal: generation.signal,
             resolveModel: params.resolveModel,

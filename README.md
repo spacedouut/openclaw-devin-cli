@@ -80,6 +80,7 @@ openclaw plugins enable devin-cli --accept-capabilities
       "devin-cli": {
         "config": {
           // "command": "devin",            // binary name or absolute path
+          // "tools": "openclaw",           // openclaw | both | devin (see "OpenClaw tools")
           // "permissionMode": "smart",     // auto | accept-edits | smart | dangerous
           // "modelAliases": { "max": "swe-2-max" } // custom short ids -> devin --model ids
           // "autoReasoningFamilies": true, // one model per family; thinking level picks the variant
@@ -97,6 +98,29 @@ plugin mirrors OpenClaw's own exec policy: a `full` exec mode grants Devin
 auto-runs actions a fast model judges safe. Permission prompts Devin still
 raises are auto-approved by the harness, except in `auto` (ACP `ask`, read-only),
 where they are rejected.
+
+## OpenClaw tools
+
+Each turn the harness builds OpenClaw's tool set for that run (same policy,
+allowlists, sandbox, approvals and hooks as OpenClaw's built-in runtime) and
+serves it to Devin over MCP: a per-turn streamable-HTTP server on `127.0.0.1`,
+guarded by a random bearer token, passed to `devin acp` in `session/new` /
+`session/load` as the `openclaw` MCP server and closed when the turn ends.
+
+- `openclaw` (default): Devin's built-in tools (exec, read/write/edit, grep,
+  web, subagents, ...) are switched off through a generated Devin config
+  (`disabled_tools`, merged over your `~/.config/devin/config.json` and passed
+  with `devin --config`). Devin keeps only its MCP client controls
+  (`mcp_list_tools`, `mcp_call_tool`, ...) and `skill`, so every action goes
+  through an OpenClaw tool.
+- `both`: Devin keeps its built-in tools; OpenClaw tools that duplicate them
+  (`read`, `write`, `edit`, `apply_patch`, `exec`, `process`, `web_search`,
+  `web_fetch`) are left out of the MCP server.
+- `devin`: no MCP server; Devin's built-in tools only.
+
+OpenClaw tool calls show up under their OpenClaw names in the transcript and
+tool cards. Devin's `mcp_list_tools` lookups against the `openclaw` server are
+not shown.
 
 ## Reasoning families
 
