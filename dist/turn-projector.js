@@ -26,6 +26,7 @@ export class DevinTurnProjector {
     current = newSegment();
     deferredText = "";
     deferredItemId;
+    deferredStartedAt;
     ready = [];
     groupSeq = 0;
     segmentTexts = [];
@@ -45,10 +46,12 @@ export class DevinTurnProjector {
         if (this.current.tools.length > 0) {
             this.deferredText += delta;
             this.deferredItemId ??= itemId;
+            this.deferredStartedAt ??= this.now();
         }
         else {
             this.current.text += delta;
             this.current.itemId ??= itemId;
+            this.current.startedAt ??= this.now();
         }
     }
     withRun(message) {
@@ -58,6 +61,7 @@ export class DevinTurnProjector {
     toolStart(call) {
         if (this.current.tools.some((tool) => tool.id === call.id))
             return;
+        this.current.startedAt ??= this.now();
         this.current.tools.push(call);
     }
     toolEnd(result) {
@@ -100,7 +104,7 @@ export class DevinTurnProjector {
             api: modelRef.api,
             content,
             stopReason: "toolUse",
-            timestamp: this.now(),
+            timestamp: segment.startedAt ?? this.now(),
             usage: usageFrom(),
         };
         this.ready.push([
@@ -110,9 +114,10 @@ export class DevinTurnProjector {
                 message: this.withRun(segment.results.get(tool.id)),
             })),
         ]);
-        this.current = newSegment(this.deferredText, this.deferredItemId);
+        this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt);
         this.deferredText = "";
         this.deferredItemId = undefined;
+        this.deferredStartedAt = undefined;
     }
     /** Completed assistant/tool-result groups not yet handed to the writer. */
     takeReadyGroups() {
@@ -156,6 +161,12 @@ export class DevinTurnProjector {
         return [...this.segmentTexts];
     }
 }
-function newSegment(text = "", itemId) {
-    return { text, ...(itemId ? { itemId } : {}), tools: [], results: new Map() };
+function newSegment(text = "", itemId, startedAt) {
+    return {
+        text,
+        ...(itemId ? { itemId } : {}),
+        ...(startedAt !== undefined ? { startedAt } : {}),
+        tools: [],
+        results: new Map(),
+    };
 }

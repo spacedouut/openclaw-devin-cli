@@ -19,6 +19,7 @@ type ToolCall = { id: string; name: string; args: Record<string, unknown> };
 type Segment = {
   text: string;
   itemId?: string;
+  startedAt?: number;
   tools: ToolCall[];
   results: Map<string, ToolResultMessage>;
 };
@@ -60,6 +61,7 @@ export class DevinTurnProjector {
   private current: Segment = newSegment();
   private deferredText = "";
   private deferredItemId: string | undefined;
+  private deferredStartedAt: number | undefined;
   private readonly ready: TranscriptWrite[][] = [];
   private groupSeq = 0;
   private readonly segmentTexts: string[] = [];
@@ -86,9 +88,11 @@ export class DevinTurnProjector {
     if (this.current.tools.length > 0) {
       this.deferredText += delta;
       this.deferredItemId ??= itemId;
+      this.deferredStartedAt ??= this.now();
     } else {
       this.current.text += delta;
       this.current.itemId ??= itemId;
+      this.current.startedAt ??= this.now();
     }
   }
 
@@ -99,6 +103,7 @@ export class DevinTurnProjector {
 
   toolStart(call: ToolCall): void {
     if (this.current.tools.some((tool) => tool.id === call.id)) return;
+    this.current.startedAt ??= this.now();
     this.current.tools.push(call);
   }
 
@@ -142,7 +147,7 @@ export class DevinTurnProjector {
       api: modelRef.api,
       content,
       stopReason: "toolUse",
-      timestamp: this.now(),
+      timestamp: segment.startedAt ?? this.now(),
       usage: usageFrom(),
     } as AssistantMessage;
     this.ready.push([
@@ -152,9 +157,10 @@ export class DevinTurnProjector {
         message: this.withRun(segment.results.get(tool.id)!),
       })),
     ]);
-    this.current = newSegment(this.deferredText, this.deferredItemId);
+    this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt);
     this.deferredText = "";
     this.deferredItemId = undefined;
+    this.deferredStartedAt = undefined;
   }
 
   /** Completed assistant/tool-result groups not yet handed to the writer. */
@@ -207,6 +213,12 @@ export class DevinTurnProjector {
   }
 }
 
-function newSegment(text = "", itemId?: string): Segment {
-  return { text, ...(itemId ? { itemId } : {}), tools: [], results: new Map() };
+function newSegment(text = "", itemId?: string, startedAt?: number): Segment {
+  return {
+    text,
+    ...(itemId ? { itemId } : {}),
+    ...(startedAt !== undefined ? { startedAt } : {}),
+    tools: [],
+    results: new Map(),
+  };
 }

@@ -90,3 +90,16 @@ test("pre-tool text is keyed to its live item and every group row carries the ru
     ],
   );
 });
+
+test("tool-call rows are stamped when their segment started, not when results arrived", () => {
+  let clock = 10;
+  const p = new DevinTurnProjector({ modelRef, keyPrefix: "req", now: () => clock });
+  p.text("Checking.");
+  clock = 20;
+  p.toolStart({ id: "t1", name: "exec", args: {} });
+  clock = 30;
+  p.toolEnd({ id: "t1", name: "exec", output: "ok", isError: false });
+  const [assistant, result] = p.takeReadyGroups().flat();
+  assert.equal(assistant.message.timestamp, 10);
+  assert.equal(result.message.timestamp, 30);
+});
