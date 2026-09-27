@@ -163,7 +163,7 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
         api: "openai-responses",
         baseUrl: "",
         reasoning: Boolean(match),
-        input: ["text"],
+        input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: match?.family.contextWindow ?? 262_000,
         maxTokens: match?.family.maxTokens ?? 128_000,

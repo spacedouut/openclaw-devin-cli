@@ -193,8 +193,10 @@ Unmapped ids also pass straight through to `devin --model`, so refs keep
 working even for models missing from the catalog. Add your own short names
 via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
 
-- **Images:** image attachments are passed to Devin as ACP image blocks.
-- **MCP:** no OpenClaw MCP servers are forwarded; Devin uses its own tools.
+- **Images:** every `devin-cli` model is reported as accepting text + image
+  input (Devin advertises ACP `promptCapabilities.image` and handles images for
+  every model family), so OpenClaw passes attachments and image tool results
+  through as ACP image blocks instead of dropping them.
 
 ## Caveats / open questions
 
