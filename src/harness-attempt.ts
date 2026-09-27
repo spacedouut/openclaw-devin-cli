@@ -42,9 +42,9 @@ import {
 } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { DevinUsageTracker, type DevinUsageRecord } from "./devin-usage.js";
+import { resolveDevinTool, type DevinToolIdentity } from "./devin-tool-names.js";
 import {
   OPENCLAW_MCP_SERVER_NAME,
-  OPENCLAW_MCP_TOOL_PREFIX,
   startOpenClawMcpBridge,
   type OpenClawMcpBridge,
   type OpenClawToolCompletion,
@@ -113,17 +113,10 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-function devinToolName(update: AcpSessionUpdate): string | undefined {
-  const named = update._meta?.["cognition.ai/toolName"] ?? update._meta?.["cognition.ai/inferenceToolName"];
-  return typeof named === "string" ? named : undefined;
-}
-
-/** Devin first reports MCP calls as `mcp_call_tool`, then renames them to `mcp__<server>__<tool>`. */
-function toolNameFor(update: AcpSessionUpdate, previous?: ToolState): string {
+function toolNameFor(resolved: Partial<DevinToolIdentity>, update: AcpSessionUpdate, previous?: ToolState): string {
   if (previous?.started) return previous.name;
-  const named = devinToolName(update);
-  if (named?.startsWith(OPENCLAW_MCP_TOOL_PREFIX)) return named.slice(OPENCLAW_MCP_TOOL_PREFIX.length);
-  return previous?.name ?? named ?? update.kind ?? "tool";
+  if (resolved.openclaw && resolved.name) return resolved.name;
+  return previous?.name ?? resolved.name ?? update.kind ?? "tool";
 }
 
 function isOpenClawDiscovery(name: string, args: Record<string, unknown>): boolean {
@@ -422,18 +415,17 @@ export async function runDevinAttempt(
     if (!id) return;
     const previous = tools.get(id);
     const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
-    const name = toolNameFor(update, previous);
-    const args =
-      update.rawInput && typeof update.rawInput === "object" ? asRecord(update.rawInput) : (previous?.args ?? {});
-    const openclaw =
-      previous?.openclaw || (!previous?.started && Boolean(devinToolName(update)?.startsWith(OPENCLAW_MCP_TOOL_PREFIX)));
+    const resolved = resolveDevinTool(update);
+    const name = toolNameFor(resolved, update, previous);
+    const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
+    const args = resolved.args ?? previous?.args ?? {};
     if (openclaw && !previous?.openclaw) {
       openClawCallIds.set(name, [...(openClawCallIds.get(name) ?? []), id]);
     }
     const next: ToolState = {
       id,
       name,
-      title: update.title ?? previous?.title,
+      title: openclaw ? undefined : (resolved.title ?? previous?.title),
       kind: update.kind ?? previous?.kind,
       args,
       status: update.status ?? previous?.status,

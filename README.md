@@ -134,9 +134,11 @@ guarded by a random bearer token, passed to `devin acp` in `session/new` /
   `web_fetch`) are left out of the MCP server.
 - `devin`: no MCP server; Devin's built-in tools only.
 
-OpenClaw tool calls show up under their OpenClaw names in the transcript and
-tool cards. Devin's `mcp_list_tools` lookups against the `openclaw` server are
-not shown.
+OpenClaw tool calls show up as the OpenClaw tool itself in the transcript and
+tool cards: `mcp__openclaw__read` and `mcp_call_tool` on the `openclaw` server
+are both reported as `read` with the tool's own arguments, without Devin's
+"Calling read from openclaw" title. Devin's `mcp_list_tools` lookups against
+the `openclaw` server are not shown.
 
 ## Session titles and utility completions
 
