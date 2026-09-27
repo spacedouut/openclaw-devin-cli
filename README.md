@@ -122,6 +122,19 @@ OpenClaw tool calls show up under their OpenClaw names in the transcript and
 tool cards. Devin's `mcp_list_tools` lookups against the `openclaw` server are
 not shown.
 
+## Session titles and utility completions
+
+The harness implements OpenClaw's isolated completion, so OpenClaw's own
+session-title generator (and other short utility prompts) run through Devin
+instead of failing and leaving a random slug. Each call starts a throwaway
+`devin acp` session with Devin's built-in tools disabled, no MCP servers and
+read-only (`ask`) mode; if Devin still tries a tool or asks for a permission,
+the completion fails closed.
+
+Titles use the plugin's default utility model, `devin-cli/swe-2`, unless
+`agents.defaults.utilityModel` is set. A title you set yourself (rename /
+label) always wins over the generated one.
+
 ## Reasoning families
 
 Devin encodes effort in the model id (`claude-opus-5-5-medium`, `-high`,

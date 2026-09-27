@@ -1,4 +1,5 @@
 import { runDevinAttempt } from "./harness-attempt.js";
+import { runDevinIsolatedCompletion } from "./isolated-completion.js";
 import { DevinSessionBindings } from "./session-bindings.js";
 export const HARNESS_ID = "devin-cli";
 export function createDevinHarness(params) {
@@ -39,6 +40,11 @@ export function createDevinHarness(params) {
             resolveModel: params.resolveModel,
             resolvePermissionMode: params.resolvePermissionMode,
             logger: params.logger,
+        }),
+        runIsolatedCompletionV2: (input) => runDevinIsolatedCompletion(input, {
+            command: params.command(),
+            stateDir: params.stateDir(),
+            model: params.resolveIsolatedModel(input),
         }),
         reset: (input) => {
             if (input.sessionId)

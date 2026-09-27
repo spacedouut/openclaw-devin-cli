@@ -77,7 +77,10 @@ function findFamily(config: OpenClawConfig | undefined, modelId: string) {
 }
 
 /** OpenClaw model id + thinking level (and fast mode) -> `devin --model` id. */
-function resolveDevinModel(input: AgentHarnessAttemptParamsV2): string {
+function resolveDevinModel(
+  input: Pick<AgentHarnessAttemptParamsV2, "config" | "modelId"> &
+    Partial<Pick<AgentHarnessAttemptParamsV2, "thinkLevel" | "fastMode">>,
+): string {
   const alias = pluginConfig(input.config).modelAliases?.[input.modelId];
   if (alias) return alias;
   const match = findFamily(input.config, input.modelId);
@@ -183,6 +186,8 @@ export default definePluginEntry({
         resolveModel: resolveDevinModel,
         resolvePermissionMode: (input) => resolvePermissionMode(input.config, input.agentId),
         resolveToolSurface: (input) => pluginConfig(input.config).tools ?? "openclaw",
+        resolveIsolatedModel: (input) =>
+          resolveDevinModel({ config: input.config, modelId: input.modelId, thinkLevel: input.thinkLevel }),
         logger: api.logger,
       }),
     );

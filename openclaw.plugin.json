@@ -22,6 +22,7 @@
     "providers": {
       "devin-cli": {
         "defaultModel": "adaptive",
+        "defaultUtilityModel": "swe-2",
         "models": [
           { "id": "adaptive", "name": "Adaptive", "input": ["text"] },
           { "id": "swe-2", "name": "SWE-2", "input": ["text"] },
