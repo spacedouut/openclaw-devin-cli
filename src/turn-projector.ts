@@ -16,7 +16,12 @@ export type TranscriptWrite = { key: string; message: AssistantMessage | ToolRes
 export type ModelRef = { provider: string; model: string; api: string };
 
 type ToolCall = { id: string; name: string; args: Record<string, unknown> };
-type Segment = { text: string; tools: ToolCall[]; results: Map<string, ToolResultMessage> };
+type Segment = {
+  text: string;
+  itemId?: string;
+  tools: ToolCall[];
+  results: Map<string, ToolResultMessage>;
+};
 
 const ZERO_USAGE = {
   input: 0,
@@ -54,6 +59,7 @@ export function usageFrom(usage?: {
 export class DevinTurnProjector {
   private current: Segment = newSegment();
   private deferredText = "";
+  private deferredItemId: string | undefined;
   private readonly ready: TranscriptWrite[][] = [];
   private groupSeq = 0;
   private readonly segmentTexts: string[] = [];
@@ -62,6 +68,7 @@ export class DevinTurnProjector {
     private readonly params: {
       modelRef: ModelRef;
       keyPrefix: string;
+      runId?: string;
       now?: () => number;
     },
   ) {}
@@ -70,14 +77,24 @@ export class DevinTurnProjector {
     return this.params.now?.() ?? Date.now();
   }
 
-  /** Appends streamed assistant text to the open segment. */
-  text(delta: string): void {
+  /**
+   * Appends streamed assistant text to the open segment. `itemId` is the live
+   * item the text was streamed under, so history can replace that live item.
+   */
+  text(delta: string, itemId?: string): void {
     if (!delta) return;
     if (this.current.tools.length > 0) {
       this.deferredText += delta;
+      this.deferredItemId ??= itemId;
     } else {
       this.current.text += delta;
+      this.current.itemId ??= itemId;
     }
+  }
+
+  private withRun<T extends AssistantMessage | ToolResultMessage>(message: T): T {
+    const { runId } = this.params;
+    return (runId ? { ...message, __openclaw: { runId } } : message) as T;
   }
 
   toolStart(call: ToolCall): void {
@@ -106,7 +123,13 @@ export class DevinTurnProjector {
     const { modelRef, keyPrefix } = this.params;
     const content: AssistantMessage["content"] = [];
     if (segment.text) {
-      content.push({ type: "text", text: segment.text });
+      content.push({
+        type: "text",
+        text: segment.text,
+        ...(segment.itemId
+          ? { textSignature: JSON.stringify({ v: 1, id: segment.itemId, phase: "commentary" }) }
+          : {}),
+      });
       this.segmentTexts.push(segment.text);
     }
     for (const tool of segment.tools) {
@@ -123,14 +146,15 @@ export class DevinTurnProjector {
       usage: usageFrom(),
     } as AssistantMessage;
     this.ready.push([
-      { key: `${keyPrefix}:devin:group:${seq}:assistant`, message: assistant },
+      { key: `${keyPrefix}:devin:group:${seq}:assistant`, message: this.withRun(assistant) },
       ...segment.tools.map((tool) => ({
         key: `${keyPrefix}:devin:tool:${tool.id}`,
-        message: segment.results.get(tool.id)!,
+        message: this.withRun(segment.results.get(tool.id)!),
       })),
     ]);
-    this.current = newSegment(this.deferredText);
+    this.current = newSegment(this.deferredText, this.deferredItemId);
     this.deferredText = "";
+    this.deferredItemId = undefined;
   }
 
   /** Completed assistant/tool-result groups not yet handed to the writer. */
@@ -183,6 +207,6 @@ export class DevinTurnProjector {
   }
 }
 
-function newSegment(text = ""): Segment {
-  return { text, tools: [], results: new Map() };
+function newSegment(text = "", itemId?: string): Segment {
+  return { text, ...(itemId ? { itemId } : {}), tools: [], results: new Map() };
 }

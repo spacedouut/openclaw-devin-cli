@@ -68,3 +68,25 @@ test("tool-only turns get a non-empty fallback and unresolved tools are closed",
   assert.equal(done.finalText, "summary");
   assert.equal(done.final.message.content[0].text, "summary");
 });
+
+test("pre-tool text is keyed to its live item and every group row carries the run id", () => {
+  const p = new DevinTurnProjector({ modelRef, keyPrefix: "req", runId: "run-1", now: () => 1 });
+  p.text("Checking.", "run-1:devin-text:1");
+  p.toolStart({ id: "t1", name: "exec", args: {} });
+  p.text("Next.", "run-1:devin-text:2");
+  p.toolEnd({ id: "t1", name: "exec", output: "ok", isError: false });
+  p.toolStart({ id: "t2", name: "exec", args: {} });
+  p.toolEnd({ id: "t2", name: "exec", output: "ok", isError: false });
+  const writes = p.takeReadyGroups().flat();
+  assert.deepEqual(
+    writes.map((w) => w.message.__openclaw),
+    [{ runId: "run-1" }, { runId: "run-1" }, { runId: "run-1" }, { runId: "run-1" }],
+  );
+  assert.deepEqual(
+    [writes[0], writes[2]].map((w) => JSON.parse(w.message.content[0].textSignature)),
+    [
+      { v: 1, id: "run-1:devin-text:1", phase: "commentary" },
+      { v: 1, id: "run-1:devin-text:2", phase: "commentary" },
+    ],
+  );
+});

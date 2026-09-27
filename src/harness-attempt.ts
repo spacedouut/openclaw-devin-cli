@@ -299,7 +299,7 @@ export async function runDevinAttempt(
         assertActive();
       }
       liveText += delta;
-      projector?.text(delta);
+      projector?.text(delta, liveItemId());
       await emit("assistant", { itemId: liveItemId(), text: liveText, delta });
       assertActive();
       await input.onPartialReply?.({ text: liveText });
@@ -479,7 +479,7 @@ export async function runDevinAttempt(
       throw new Error("Devin input was not admitted to its transcript");
     }
     const requestId = `${admission.entryId}:devin:${randomUUID()}`;
-    projector = new DevinTurnProjector({ modelRef, keyPrefix: requestId });
+    projector = new DevinTurnProjector({ modelRef, keyPrefix: requestId, runId: input.runId });
 
     const cwd = input.workspaceDir;
     const mcpServers: AcpMcpServer[] = [];

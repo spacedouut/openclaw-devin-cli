@@ -25,6 +25,7 @@ export class DevinTurnProjector {
     params;
     current = newSegment();
     deferredText = "";
+    deferredItemId;
     ready = [];
     groupSeq = 0;
     segmentTexts = [];
@@ -34,16 +35,25 @@ export class DevinTurnProjector {
     now() {
         return this.params.now?.() ?? Date.now();
     }
-    /** Appends streamed assistant text to the open segment. */
-    text(delta) {
+    /**
+     * Appends streamed assistant text to the open segment. `itemId` is the live
+     * item the text was streamed under, so history can replace that live item.
+     */
+    text(delta, itemId) {
         if (!delta)
             return;
         if (this.current.tools.length > 0) {
             this.deferredText += delta;
+            this.deferredItemId ??= itemId;
         }
         else {
             this.current.text += delta;
+            this.current.itemId ??= itemId;
         }
+    }
+    withRun(message) {
+        const { runId } = this.params;
+        return (runId ? { ...message, __openclaw: { runId } } : message);
     }
     toolStart(call) {
         if (this.current.tools.some((tool) => tool.id === call.id))
@@ -71,7 +81,13 @@ export class DevinTurnProjector {
         const { modelRef, keyPrefix } = this.params;
         const content = [];
         if (segment.text) {
-            content.push({ type: "text", text: segment.text });
+            content.push({
+                type: "text",
+                text: segment.text,
+                ...(segment.itemId
+                    ? { textSignature: JSON.stringify({ v: 1, id: segment.itemId, phase: "commentary" }) }
+                    : {}),
+            });
             this.segmentTexts.push(segment.text);
         }
         for (const tool of segment.tools) {
@@ -88,14 +104,15 @@ export class DevinTurnProjector {
             usage: usageFrom(),
         };
         this.ready.push([
-            { key: `${keyPrefix}:devin:group:${seq}:assistant`, message: assistant },
+            { key: `${keyPrefix}:devin:group:${seq}:assistant`, message: this.withRun(assistant) },
             ...segment.tools.map((tool) => ({
                 key: `${keyPrefix}:devin:tool:${tool.id}`,
-                message: segment.results.get(tool.id),
+                message: this.withRun(segment.results.get(tool.id)),
             })),
         ]);
-        this.current = newSegment(this.deferredText);
+        this.current = newSegment(this.deferredText, this.deferredItemId);
         this.deferredText = "";
+        this.deferredItemId = undefined;
     }
     /** Completed assistant/tool-result groups not yet handed to the writer. */
     takeReadyGroups() {
@@ -139,6 +156,6 @@ export class DevinTurnProjector {
         return [...this.segmentTexts];
     }
 }
-function newSegment(text = "") {
-    return { text, tools: [], results: new Map() };
+function newSegment(text = "", itemId) {
+    return { text, ...(itemId ? { itemId } : {}), tools: [], results: new Map() };
 }
