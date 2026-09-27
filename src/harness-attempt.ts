@@ -194,6 +194,23 @@ export async function runDevinAttempt(
   let projector: DevinTurnProjector | undefined;
   let liveText = "";
   let liveSegmentOpen = false;
+  let liveSegment = 0;
+  const liveItemId = () => `${input.runId}:devin-text:${liveSegment}`;
+
+  const closeLiveSegment = async () => {
+    if (!liveSegmentOpen) return;
+    liveSegmentOpen = false;
+    const progressText = liveText.replace(/\s+/gu, " ").trim();
+    if (!progressText) return;
+    await emit("item", {
+      itemId: liveItemId(),
+      kind: "preamble",
+      title: "Preamble",
+      phase: "end",
+      progressText,
+      source: "devin-cli",
+    });
+  };
 
   const writeGroups = async (groups: TranscriptWrite[][]) => {
     for (const group of groups) {
@@ -216,13 +233,14 @@ export async function runDevinAttempt(
     enqueue(async () => {
       if (!liveSegmentOpen) {
         liveSegmentOpen = true;
+        liveSegment += 1;
         liveText = "";
         await input.onAssistantMessageStart?.();
         assertActive();
       }
       liveText += delta;
       projector?.text(delta);
-      await emit("assistant", { text: liveText, delta });
+      await emit("assistant", { itemId: liveItemId(), text: liveText, delta });
       assertActive();
       await input.onPartialReply?.({ text: liveText });
     });
@@ -254,7 +272,7 @@ export async function runDevinAttempt(
       next.started = true;
       const args = { ...(next.title ? { title: next.title } : {}), ...next.args };
       enqueue(async () => {
-        liveSegmentOpen = false;
+        await closeLiveSegment();
         projector?.toolStart({ id, name: next.name, args });
         const toolData = { phase: "start" as const, name: next.name, toolCallId: id, args };
         await emit("item", projectAgentToolActivity(toolData) as Record<string, unknown>);
@@ -492,8 +510,9 @@ export async function runDevinAttempt(
       } as AssistantMessage;
       if (!liveSegmentOpen || text !== liveText) {
         // Tool-only turns and appended notes were never streamed.
+        if (!liveSegmentOpen) liveSegment += 1;
         await input.onAssistantMessageStart?.();
-        await emit("assistant", { text, delta: text });
+        await emit("assistant", { itemId: liveItemId(), text, delta: liveSegmentOpen ? "" : text });
       }
       assertActive();
       const written = await appendSessionTranscriptMessageByIdentityStrict({
