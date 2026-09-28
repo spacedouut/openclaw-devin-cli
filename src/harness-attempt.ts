@@ -41,6 +41,7 @@ import {
   type AcpSessionUpdate,
 } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
+import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
 import { DevinUsageTracker, type DevinUsageRecord } from "./devin-usage.js";
 import { resolveDevinTool, type DevinToolIdentity } from "./devin-tool-names.js";
 import {
@@ -92,7 +93,9 @@ type ToolState = {
   denied: boolean;
   /** Served by the OpenClaw MCP bridge; OpenClaw policy governs it. */
   openclaw: boolean;
-  /** Devin's own discovery call against the OpenClaw MCP server. */
+  /** Forwarded OpenClaw-configured MCP server that serves the tool. */
+  mcpServer?: string;
+  /** Devin's own discovery call against the OpenClaw or a forwarded MCP server. */
   hidden: boolean;
   startedAt: number;
 };
@@ -115,23 +118,35 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 function toolNameFor(resolved: Partial<DevinToolIdentity>, update: AcpSessionUpdate, previous?: ToolState): string {
   if (previous?.started) return previous.name;
-  if (resolved.openclaw && resolved.name) return resolved.name;
+  if ((resolved.openclaw || resolved.mcpServer) && resolved.name) return resolved.name;
   return previous?.name ?? resolved.name ?? update.kind ?? "tool";
 }
 
-function isOpenClawDiscovery(name: string, args: Record<string, unknown>): boolean {
+function isBridgedDiscovery(
+  name: string,
+  args: Record<string, unknown>,
+  forwardedServers: ReadonlySet<string>,
+): boolean {
   return (
     (name === "mcp_list_tools" || name === "mcp_read_resource") &&
-    args.server_name === OPENCLAW_MCP_SERVER_NAME
+    typeof args.server_name === "string" &&
+    (args.server_name === OPENCLAW_MCP_SERVER_NAME || forwardedServers.has(args.server_name))
   );
 }
 
-function openClawToolsNote(surface: DevinToolSurface, toolNames: string[]): string {
-  const lines = [
-    `OpenClaw tools are served by the \`${OPENCLAW_MCP_SERVER_NAME}\` MCP server: ${toolNames.join(", ")}.`,
-    `Load them once with mcp_list_tools (server_name "${OPENCLAW_MCP_SERVER_NAME}"), then call them directly.`,
-  ];
-  if (surface === "openclaw") {
+function openClawToolsNote(surface: DevinToolSurface, toolNames: string[], forwardedServers: string[]): string {
+  const lines = toolNames.length
+    ? [
+        `OpenClaw tools are served by the \`${OPENCLAW_MCP_SERVER_NAME}\` MCP server: ${toolNames.join(", ")}.`,
+        `Load them once with mcp_list_tools (server_name "${OPENCLAW_MCP_SERVER_NAME}"), then call them directly.`,
+      ]
+    : [];
+  if (forwardedServers.length) {
+    lines.push(
+      `OpenClaw's configured MCP servers are connected under their own names: ${forwardedServers.join(", ")}.`,
+    );
+  }
+  if (surface === "openclaw" && toolNames.length) {
     lines.push("Devin's built-in shell, file and web tools are disabled in this runtime; use the OpenClaw tools instead.");
   }
   return lines.join("\n");
@@ -212,6 +227,7 @@ export async function runDevinAttempt(
   const tools = new Map<string, ToolState>();
   const toolMetas: AgentHarnessAttemptResult["toolMetas"] = [];
   let bridge: OpenClawMcpBridge | undefined;
+  const forwardedServerNames = new Set<string>();
   const openClawCallIds = new Map<string, string[]>();
   const messagingSentTexts: string[] = [];
   const messagingSentMediaUrls: string[] = [];
@@ -415,9 +431,10 @@ export async function runDevinAttempt(
     if (!id) return;
     const previous = tools.get(id);
     const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
-    const resolved = resolveDevinTool(update);
+    const resolved = resolveDevinTool(update, forwardedServerNames);
     const name = toolNameFor(resolved, update, previous);
     const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
+    const mcpServer = previous?.started ? previous.mcpServer : (resolved.mcpServer ?? previous?.mcpServer);
     const args = resolved.args ?? previous?.args ?? {};
     if (openclaw && !previous?.openclaw) {
       openClawCallIds.set(name, [...(openClawCallIds.get(name) ?? []), id]);
@@ -425,7 +442,7 @@ export async function runDevinAttempt(
     const next: ToolState = {
       id,
       name,
-      title: openclaw ? undefined : (resolved.title ?? previous?.title),
+      title: openclaw || mcpServer ? undefined : (resolved.title ?? previous?.title),
       kind: update.kind ?? previous?.kind,
       args,
       status: update.status ?? previous?.status,
@@ -434,7 +451,8 @@ export async function runDevinAttempt(
       finished: previous?.finished ?? false,
       denied: previous?.denied ?? false,
       openclaw,
-      hidden: previous?.hidden || (!previous?.started && isOpenClawDiscovery(name, args)),
+      mcpServer,
+      hidden: previous?.hidden || (!previous?.started && isBridgedDiscovery(name, args, forwardedServerNames)),
       startedAt: previous?.startedAt ?? Date.now(),
     };
     tools.set(id, next);
@@ -603,6 +621,15 @@ export async function runDevinAttempt(
       }
       assertActive();
     }
+    const forwarded = await resolveForwardedMcpServers(input, agentId);
+    assertActive();
+    for (const skipped of forwarded.skipped) {
+      deps.logger?.warn?.(`devin-cli: MCP server "${skipped.configName}" not given to Devin: ${skipped.reason}`);
+    }
+    for (const { server } of forwarded.servers) {
+      mcpServers.push(server);
+      forwardedServerNames.add(server.name);
+    }
     const configPath =
       deps.toolSurface === "openclaw" ? writeOpenClawOnlyDevinConfig({ stateDir: deps.stateDir }) : undefined;
     acp = new DevinAcpProcess(
@@ -702,7 +729,9 @@ export async function runDevinAttempt(
       developerInstructions: [
         ...(bootstrap?.contextFiles.map((file) => `${file.path}\n${file.content}`) ?? []),
         input.extraSystemPrompt,
-        bridge ? openClawToolsNote(deps.toolSurface, bridge.toolNames) : undefined,
+        bridge || forwardedServerNames.size
+          ? openClawToolsNote(deps.toolSurface, bridge?.toolNames ?? [], [...forwardedServerNames])
+          : undefined,
       ]
         .filter(Boolean)
         .join("\n\n"),

@@ -111,7 +111,7 @@ export function pickPermissionOption(
 
 /** ACP `McpServer` entries Devin connects to for a session. */
 export type AcpMcpServer =
-  | { type: "http"; name: string; url: string; headers: { name: string; value: string }[] }
+  | { type: "http" | "sse"; name: string; url: string; headers: { name: string; value: string }[] }
   | { name: string; command: string; args: string[]; env: { name: string; value: string }[] };
 
 export type DevinAcpHandlers = {

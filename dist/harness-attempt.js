@@ -12,6 +12,7 @@ import { appendSessionTranscriptMessageByIdentityStrict, appendSessionTranscript
 import { randomUUID } from "node:crypto";
 import { ACP_MODES, acpText, DevinAcpProcess, pickPermissionOption, } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
+import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
 import { DevinUsageTracker } from "./devin-usage.js";
 import { resolveDevinTool } from "./devin-tool-names.js";
 import { OPENCLAW_MCP_SERVER_NAME, startOpenClawMcpBridge, } from "./openclaw-mcp-server.js";
@@ -31,20 +32,26 @@ function asRecord(value) {
 function toolNameFor(resolved, update, previous) {
     if (previous?.started)
         return previous.name;
-    if (resolved.openclaw && resolved.name)
+    if ((resolved.openclaw || resolved.mcpServer) && resolved.name)
         return resolved.name;
     return previous?.name ?? resolved.name ?? update.kind ?? "tool";
 }
-function isOpenClawDiscovery(name, args) {
+function isBridgedDiscovery(name, args, forwardedServers) {
     return ((name === "mcp_list_tools" || name === "mcp_read_resource") &&
-        args.server_name === OPENCLAW_MCP_SERVER_NAME);
+        typeof args.server_name === "string" &&
+        (args.server_name === OPENCLAW_MCP_SERVER_NAME || forwardedServers.has(args.server_name)));
 }
-function openClawToolsNote(surface, toolNames) {
-    const lines = [
-        `OpenClaw tools are served by the \`${OPENCLAW_MCP_SERVER_NAME}\` MCP server: ${toolNames.join(", ")}.`,
-        `Load them once with mcp_list_tools (server_name "${OPENCLAW_MCP_SERVER_NAME}"), then call them directly.`,
-    ];
-    if (surface === "openclaw") {
+function openClawToolsNote(surface, toolNames, forwardedServers) {
+    const lines = toolNames.length
+        ? [
+            `OpenClaw tools are served by the \`${OPENCLAW_MCP_SERVER_NAME}\` MCP server: ${toolNames.join(", ")}.`,
+            `Load them once with mcp_list_tools (server_name "${OPENCLAW_MCP_SERVER_NAME}"), then call them directly.`,
+        ]
+        : [];
+    if (forwardedServers.length) {
+        lines.push(`OpenClaw's configured MCP servers are connected under their own names: ${forwardedServers.join(", ")}.`);
+    }
+    if (surface === "openclaw" && toolNames.length) {
         lines.push("Devin's built-in shell, file and web tools are disabled in this runtime; use the OpenClaw tools instead.");
     }
     return lines.join("\n");
@@ -119,6 +126,7 @@ export async function runDevinAttempt(input, deps) {
     const tools = new Map();
     const toolMetas = [];
     let bridge;
+    const forwardedServerNames = new Set();
     const openClawCallIds = new Map();
     const messagingSentTexts = [];
     const messagingSentMediaUrls = [];
@@ -317,9 +325,10 @@ export async function runDevinAttempt(input, deps) {
             return;
         const previous = tools.get(id);
         const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
-        const resolved = resolveDevinTool(update);
+        const resolved = resolveDevinTool(update, forwardedServerNames);
         const name = toolNameFor(resolved, update, previous);
         const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
+        const mcpServer = previous?.started ? previous.mcpServer : (resolved.mcpServer ?? previous?.mcpServer);
         const args = resolved.args ?? previous?.args ?? {};
         if (openclaw && !previous?.openclaw) {
             openClawCallIds.set(name, [...(openClawCallIds.get(name) ?? []), id]);
@@ -327,7 +336,7 @@ export async function runDevinAttempt(input, deps) {
         const next = {
             id,
             name,
-            title: openclaw ? undefined : (resolved.title ?? previous?.title),
+            title: openclaw || mcpServer ? undefined : (resolved.title ?? previous?.title),
             kind: update.kind ?? previous?.kind,
             args,
             status: update.status ?? previous?.status,
@@ -336,7 +345,8 @@ export async function runDevinAttempt(input, deps) {
             finished: previous?.finished ?? false,
             denied: previous?.denied ?? false,
             openclaw,
-            hidden: previous?.hidden || (!previous?.started && isOpenClawDiscovery(name, args)),
+            mcpServer,
+            hidden: previous?.hidden || (!previous?.started && isBridgedDiscovery(name, args, forwardedServerNames)),
             startedAt: previous?.startedAt ?? Date.now(),
         };
         tools.set(id, next);
@@ -497,6 +507,15 @@ export async function runDevinAttempt(input, deps) {
             }
             assertActive();
         }
+        const forwarded = await resolveForwardedMcpServers(input, agentId);
+        assertActive();
+        for (const skipped of forwarded.skipped) {
+            deps.logger?.warn?.(`devin-cli: MCP server "${skipped.configName}" not given to Devin: ${skipped.reason}`);
+        }
+        for (const { server } of forwarded.servers) {
+            mcpServers.push(server);
+            forwardedServerNames.add(server.name);
+        }
         const configPath = deps.toolSurface === "openclaw" ? writeOpenClawOnlyDevinConfig({ stateDir: deps.stateDir }) : undefined;
         acp = new DevinAcpProcess(deps.command, { cwd, model, configPath }, {
             onUpdate: (sessionId, update) => {
@@ -596,7 +615,9 @@ export async function runDevinAttempt(input, deps) {
             developerInstructions: [
                 ...(bootstrap?.contextFiles.map((file) => `${file.path}\n${file.content}`) ?? []),
                 input.extraSystemPrompt,
-                bridge ? openClawToolsNote(deps.toolSurface, bridge.toolNames) : undefined,
+                bridge || forwardedServerNames.size
+                    ? openClawToolsNote(deps.toolSurface, bridge?.toolNames ?? [], [...forwardedServerNames])
+                    : undefined,
             ]
                 .filter(Boolean)
                 .join("\n\n"),

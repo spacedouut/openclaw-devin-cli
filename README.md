@@ -132,7 +132,26 @@ guarded by a random bearer token, passed to `devin acp` in `session/new` /
 - `both`: Devin keeps its built-in tools; OpenClaw tools that duplicate them
   (`read`, `write`, `edit`, `apply_patch`, `exec`, `process`, `web_search`,
   `web_fetch`) are left out of the MCP server.
-- `devin`: no MCP server; Devin's built-in tools only.
+- `devin`: no `openclaw` MCP server; Devin's built-in tools only.
+
+## OpenClaw's configured MCP servers
+
+MCP servers configured in OpenClaw (`mcp.servers` and plugin-bundled servers)
+are passed to Devin as their own ACP MCP servers, next to `openclaw`, in every
+tool mode. Devin connects to them directly, so OpenClaw's native tools and each
+external server stay separate layers. Session overrides (`/mcp` server toggles,
+`toolsAllow`, disabled tools) decide which servers a turn gets, and server
+names are sanitized the same way OpenClaw names them (a server called
+`openclaw` becomes `openclaw-2`). `${VAR}` header placeholders are resolved
+from the gateway's environment when the session starts.
+
+A server is left out, with a warning in the gateway log, when Devin can't
+enforce what OpenClaw would: per-tool filters or session tool denials,
+`codex.defaultToolsApprovalMode` `prompt`/`approve`, OAuth (`auth: "oauth"`),
+a stdio `cwd`, a missing header env var, and requester-scoped servers.
+
+Their calls show up under OpenClaw's own MCP tool names, `<server>__<tool>`
+(e.g. `cua-driver__screenshot`), with the tool's own arguments.
 
 OpenClaw tool calls show up as the OpenClaw tool itself in the transcript and
 tool cards: `mcp__openclaw__read` and `mcp_call_tool` on the `openclaw` server
