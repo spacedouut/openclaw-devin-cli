@@ -53,6 +53,7 @@ export function pickPermissionOption(options, allow) {
     }
     return undefined;
 }
+export const ACP_COMPACTION_METHOD = "_cognition.ai/compaction";
 export class DevinAcpProcess {
     command;
     handlers;
@@ -141,7 +142,10 @@ export class DevinAcpProcess {
             return;
         }
         if (message.method) {
-            if (message.method === "session/update") {
+            if (message.method === ACP_COMPACTION_METHOD) {
+                this.handlers.onCompaction?.((message.params ?? {}));
+            }
+            else if (message.method === "session/update") {
                 const params = message.params;
                 if (params?.update && params.sessionId) {
                     this.handlers.onUpdate(params.sessionId, params.update);
@@ -165,6 +169,10 @@ export class DevinAcpProcess {
     async onRequest(method, params) {
         if (method === "session/request_permission") {
             return await this.handlers.onPermission(params);
+        }
+        if (method === ACP_COMPACTION_METHOD) {
+            this.handlers.onCompaction?.((params ?? {}));
+            return {};
         }
         throw new AcpRequestError(`Method not supported by OpenClaw Devin harness: ${method}`, -32601);
     }

@@ -8,6 +8,7 @@ import type {
   AgentHarnessSessionDeletionMutation,
   AgentHarnessV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
+import { compactDevinSession } from "./compaction.js";
 import { runDevinAttempt, type DevinAttemptDeps, type DevinToolSurface } from "./harness-attempt.js";
 import { runDevinIsolatedCompletion, type IsolatedCompletionParams } from "./isolated-completion.js";
 import { DevinSessionBindings } from "./session-bindings.js";
@@ -69,6 +70,12 @@ export function createDevinHarness(params: {
         command: params.command(),
         stateDir: params.stateDir(),
         model: params.resolveIsolatedModel(input),
+      }),
+    compact: (input) =>
+      compactDevinSession(input, {
+        command: params.command(),
+        stateDir: params.stateDir(),
+        bindings: store(),
       }),
     reset: (input: AgentHarnessResetParams) => {
       if (input.sessionId) store().delete(input.sessionId);

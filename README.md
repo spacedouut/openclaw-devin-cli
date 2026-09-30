@@ -56,12 +56,20 @@ Per turn the harness (`src/harness-attempt.ts`):
    occupancy `used` / window `size`, per-call tokens) and feed the turn's
    usage, context window and `contextUsage`.
 
-Devin's ACP stream has no compaction lifecycle. The harness infers a
-compaction when Devin's active context drops sharply between model calls
-(including across turns of a resumed session) and reports it as a completed
-`compaction` event and `compactionCount`; `isCompacting()` is only true while
-that event is being reported. OpenClaw-initiated compaction of Devin sessions
-is not supported.
+Compaction Devin starts on its own is inferred: when Devin's active context
+drops sharply between model calls (including across turns of a resumed
+session) the harness reports a completed `compaction` event and
+`compactionCount`; `isCompacting()` is only true while that event is being
+reported.
+
+OpenClaw's `/compact` runs Devin's own `/compact` (with any custom
+instructions) on the bound Devin session. The harness answers Devin's
+`_cognition.ai/compaction` lifecycle requests and returns Devin's summary as a
+`native-harness` compaction result. Devin may decline to compact short
+sessions; that, a failed/cancelled compaction, a missing or other-workspace
+binding, an unresumable session, abort and timeout are all reported as
+compaction failures or no-ops. Devin sends no usage update after compacting,
+so the post-compaction context size is unknown until the next turn.
 
 Devin session ids are kept per OpenClaw session in
 `<stateDir>/plugins/devin-cli/sessions.json`; OpenClaw session reset or
@@ -271,6 +279,7 @@ openclaw agent --local -m "hello" --model devin-cli/claude-opus-5-5 --thinking h
 | `src/harness-attempt.ts` | one turn: ACP session, live events, transcript writes, attempt result |
 | `src/devin-acp.ts` | `devin acp` JSON-RPC client |
 | `src/turn-projector.ts` | ACP text/reasoning/tool events → typed assistant/toolResult messages |
+| `src/compaction.ts` | OpenClaw `/compact` → Devin `/compact` on the bound session |
 | `src/devin-usage.ts` | ACP `usage_update` → OpenClaw usage, context window, inferred compaction |
 | `src/session-bindings.ts` | OpenClaw session → Devin session id store |
 | `src/provider-discovery.ts` | catalog entry: `devin models list` -> model catalog, static fallback |

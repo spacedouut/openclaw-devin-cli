@@ -114,9 +114,20 @@ export type AcpMcpServer =
   | { type: "http" | "sse"; name: string; url: string; headers: { name: string; value: string }[] }
   | { name: string; command: string; args: string[]; env: { name: string; value: string }[] };
 
+/** Devin's `_cognition.ai/compaction` lifecycle message. */
+export type AcpCompactionEvent = {
+  sessionId?: string;
+  status?: string;
+  summary?: string;
+  error?: string;
+};
+
+export const ACP_COMPACTION_METHOD = "_cognition.ai/compaction";
+
 export type DevinAcpHandlers = {
   onUpdate: (sessionId: string, update: AcpSessionUpdate) => void;
   onPermission: (request: AcpPermissionRequest) => Promise<AcpPermissionOutcome>;
+  onCompaction?: (event: AcpCompactionEvent) => void;
 };
 
 export class DevinAcpProcess {
@@ -216,7 +227,9 @@ export class DevinAcpProcess {
       return;
     }
     if (message.method) {
-      if (message.method === "session/update") {
+      if (message.method === ACP_COMPACTION_METHOD) {
+        this.handlers.onCompaction?.((message.params ?? {}) as AcpCompactionEvent);
+      } else if (message.method === "session/update") {
         const params = message.params as { sessionId?: string; update?: AcpSessionUpdate } | undefined;
         if (params?.update && params.sessionId) {
           this.handlers.onUpdate(params.sessionId, params.update);
@@ -239,6 +252,10 @@ export class DevinAcpProcess {
   private async onRequest(method: string, params: unknown): Promise<unknown> {
     if (method === "session/request_permission") {
       return await this.handlers.onPermission(params as AcpPermissionRequest);
+    }
+    if (method === ACP_COMPACTION_METHOD) {
+      this.handlers.onCompaction?.((params ?? {}) as AcpCompactionEvent);
+      return {};
     }
     throw new AcpRequestError(`Method not supported by OpenClaw Devin harness: ${method}`, -32601);
   }

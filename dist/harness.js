@@ -1,3 +1,4 @@
+import { compactDevinSession } from "./compaction.js";
 import { runDevinAttempt } from "./harness-attempt.js";
 import { runDevinIsolatedCompletion } from "./isolated-completion.js";
 import { DevinSessionBindings } from "./session-bindings.js";
@@ -45,6 +46,11 @@ export function createDevinHarness(params) {
             command: params.command(),
             stateDir: params.stateDir(),
             model: params.resolveIsolatedModel(input),
+        }),
+        compact: (input) => compactDevinSession(input, {
+            command: params.command(),
+            stateDir: params.stateDir(),
+            bindings: store(),
         }),
         reset: (input) => {
             if (input.sessionId)
