@@ -54,13 +54,13 @@ export type ProviderCatalogContext = {
 /** Offline seed so `devin-cli` is visible in model pickers before auth.
  * Every id is a value `devin --model` accepts natively. */
 const STATIC_MODELS: CatalogModel[] = [
-  { id: "adaptive", name: "Adaptive", reasoning: false, input: ["text"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
+  { id: "adaptive", name: "Adaptive", reasoning: false, input: ["text", "image"], cost: ZERO_COST, maxTokens: DEFAULT_MAX_TOKENS },
   ...["swe-2", "claude-sonnet-5", "claude-opus-5-5", "gpt-6-astra", "kimi-k3", "deepseek-v4-1-flash"].map(
     (id): CatalogModel => ({
       id,
       name: id,
       reasoning: false,
-      input: ["text"],
+      input: ["text", "image"],
       cost: ZERO_COST,
       contextWindow: DEFAULT_CONTEXT_WINDOW,
       maxTokens: DEFAULT_MAX_TOKENS,
@@ -84,7 +84,8 @@ function rawPluginConfig(config: unknown): ReasoningPluginConfig {
 
 export function devinCommand(ctx: ProviderCatalogContext): string {
   const command = rawPluginConfig(ctx.config).command;
-  return typeof command === "string" && command.trim() ? command.trim() : "devin";
+  if (typeof command === "string" && command.trim()) return command.trim();
+  return (ctx.env ?? process.env).DEVIN_OPENCLAW_COMMAND?.trim() || "devin";
 }
 
 /** Reasoning families in effect: auto-derived from Devin's catalog (unless
@@ -125,7 +126,7 @@ function modelsFromCatalog(config: unknown, catalog: DevinModelFamily[]): Catalo
     id,
     name: family.label ?? id,
     reasoning: true,
-    input: ["text"],
+    input: ["text", "image"],
     cost: ZERO_COST,
     contextWindow: family.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: family.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -139,7 +140,7 @@ function modelsFromCatalog(config: unknown, catalog: DevinModelFamily[]): Catalo
       id: uid,
       name: variant?.label ?? uid,
       reasoning: false,
-      input: ["text"],
+      input: ["text", "image"],
       cost: ZERO_COST,
       contextWindow: variant?.max_context_tokens ?? DEFAULT_CONTEXT_WINDOW,
       maxTokens: variant?.max_output_tokens ?? DEFAULT_MAX_TOKENS,
