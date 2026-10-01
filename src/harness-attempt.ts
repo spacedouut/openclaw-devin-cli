@@ -505,7 +505,11 @@ export async function runDevinAttempt(
           status: isError ? "failed" : "completed",
         }) as Record<string, unknown>,
       );
-      await input.onToolResult?.({ text: output });
+      const emitOutput =
+        typeof input.shouldEmitToolOutput === "function"
+          ? input.shouldEmitToolOutput()
+          : input.verboseLevel === "full";
+      if (emitOutput) await input.onToolResult?.({ text: output });
       await writeGroups(projector?.takeReadyGroups() ?? []);
     });
   };

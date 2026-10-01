@@ -396,7 +396,11 @@ export async function runDevinAttempt(input, deps) {
                 ...toolData,
                 status: isError ? "failed" : "completed",
             }));
-            await input.onToolResult?.({ text: output });
+            const emitOutput = typeof input.shouldEmitToolOutput === "function"
+                ? input.shouldEmitToolOutput()
+                : input.verboseLevel === "full";
+            if (emitOutput)
+                await input.onToolResult?.({ text: output });
             await writeGroups(projector?.takeReadyGroups() ?? []);
         });
     };
