@@ -350,6 +350,8 @@ export async function runDevinAttempt(input, deps) {
             startedAt: previous?.startedAt ?? Date.now(),
         };
         tools.set(id, next);
+        if (next.denied || (next.status && TERMINAL_TOOL_STATUS.has(next.status)))
+            releaseToolCallId(id);
         if (next.hidden)
             return;
         const ready = Boolean(update.status) ||
@@ -397,6 +399,15 @@ export async function runDevinAttempt(input, deps) {
             await input.onToolResult?.({ text: output });
             await writeGroups(projector?.takeReadyGroups() ?? []);
         });
+    };
+    const releaseToolCallId = (id) => {
+        for (const [name, ids] of openClawCallIds) {
+            const remaining = ids.filter((queued) => queued !== id);
+            if (remaining.length)
+                openClawCallIds.set(name, remaining);
+            else
+                openClawCallIds.delete(name);
+        }
     };
     const claimToolCallId = (toolName) => {
         const queued = openClawCallIds.get(toolName);
@@ -554,6 +565,7 @@ export async function runDevinAttempt(input, deps) {
                     const tool = tools.get(id);
                     if (tool)
                         tool.denied = true;
+                    releaseToolCallId(id);
                 }
                 const option = pickPermissionOption(request.options, allowPermissions);
                 return option
@@ -665,6 +677,7 @@ export async function runDevinAttempt(input, deps) {
             if (tool.started && !tool.finished)
                 finishTool(tool);
         }
+        openClawCallIds.clear();
         await chain;
         if (chainError)
             throw chainError;

@@ -65,8 +65,9 @@ export async function startOpenClawMcpBridge(params) {
     const pending = new Set();
     const schedule = (mode, run) => {
         const gate = barrier;
+        const inFlight = [...pending];
         const task = mode === "sequential"
-            ? gate.then(() => Promise.allSettled([...pending])).then(run)
+            ? gate.then(() => Promise.allSettled(inFlight)).then(run)
             : gate.then(run);
         if (mode === "sequential")
             barrier = task.catch(() => undefined);

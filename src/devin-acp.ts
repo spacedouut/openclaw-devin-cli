@@ -162,6 +162,7 @@ export class DevinAcpProcess {
         TERM: "dumb",
       },
     });
+    this.child.stdin.on("error", () => undefined);
     this.child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
       this.stderr = (this.stderr + chunk).slice(-STDERR_TAIL);
     });

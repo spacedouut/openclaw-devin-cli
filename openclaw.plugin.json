@@ -24,13 +24,13 @@
         "defaultModel": "adaptive",
         "defaultUtilityModel": "swe-2",
         "models": [
-          { "id": "adaptive", "name": "Adaptive", "input": ["text"] },
-          { "id": "swe-2", "name": "SWE-2", "input": ["text"] },
-          { "id": "claude-sonnet-5", "name": "Claude Sonnet 5", "input": ["text"] },
-          { "id": "claude-opus-5-5", "name": "Claude Opus 5.5", "input": ["text"] },
-          { "id": "gpt-6-astra", "name": "GPT-6 Astra", "input": ["text"] },
-          { "id": "kimi-k3", "name": "Kimi K3", "input": ["text"] },
-          { "id": "deepseek-v4-1-flash", "name": "DeepSeek V4.1 Flash", "input": ["text"] }
+          { "id": "adaptive", "name": "Adaptive", "input": ["text", "image"] },
+          { "id": "swe-2", "name": "SWE-2", "input": ["text", "image"] },
+          { "id": "claude-sonnet-5", "name": "Claude Sonnet 5", "input": ["text", "image"] },
+          { "id": "claude-opus-5-5", "name": "Claude Opus 5.5", "input": ["text", "image"] },
+          { "id": "gpt-6-astra", "name": "GPT-6 Astra", "input": ["text", "image"] },
+          { "id": "kimi-k3", "name": "Kimi K3", "input": ["text", "image"] },
+          { "id": "deepseek-v4-1-flash", "name": "DeepSeek V4.1 Flash", "input": ["text", "image"] }
         ]
       }
     },

@@ -105,9 +105,10 @@ export async function startOpenClawMcpBridge(params: {
   const pending = new Set<Promise<unknown>>();
   const schedule = <T>(mode: AnyAgentTool["executionMode"], run: () => Promise<T>): Promise<T> => {
     const gate = barrier;
+    const inFlight = [...pending];
     const task =
       mode === "sequential"
-        ? gate.then(() => Promise.allSettled([...pending])).then(run)
+        ? gate.then(() => Promise.allSettled(inFlight)).then(run)
         : gate.then(run);
     if (mode === "sequential") barrier = task.catch(() => undefined);
     pending.add(task);

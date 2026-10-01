@@ -72,6 +72,57 @@ test("lists and executes bound OpenClaw tools with claimed call ids", async () =
   }
 });
 
+test("sequential tools run after in-flight calls instead of waiting on themselves", async () => {
+  const order = [];
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const slow = {
+    name: "slow",
+    label: "Slow",
+    description: "Waits for the gate",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      await gate;
+      order.push("slow");
+      return { content: [{ type: "text", text: "slow" }], details: {} };
+    },
+  };
+  const seq = {
+    name: "seq",
+    label: "Seq",
+    description: "Sequential",
+    executionMode: "sequential",
+    parameters: { type: "object", properties: {} },
+    execute: async () => {
+      order.push("seq");
+      return { content: [{ type: "text", text: "seq" }], details: {} };
+    },
+  };
+  const bridge = await startOpenClawMcpBridge({
+    tools: [slow, seq],
+    signal: new AbortController().signal,
+    claimToolCallId: (name) => `acp-${name}`,
+  });
+  try {
+    const client = await connect(bridge);
+    const first = client.callTool({ name: "slow", arguments: {} });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const second = client.callTool({ name: "seq", arguments: {} });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(order, []);
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    assert.equal(a.content[0].text, "slow");
+    assert.equal(b.content[0].text, "seq");
+    assert.deepEqual(order, ["slow", "seq"]);
+    const alone = await client.callTool({ name: "seq", arguments: {} });
+    assert.equal(alone.content[0].text, "seq");
+    await client.close();
+  } finally {
+    await bridge.close();
+  }
+});
+
 test("rejects requests without the per-turn bearer token", async () => {
   const bridge = await startOpenClawMcpBridge({
     tools: [echoTool([])],

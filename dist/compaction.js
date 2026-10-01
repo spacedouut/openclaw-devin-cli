@@ -92,6 +92,12 @@ export async function compactDevinSession(params, deps) {
     }, deps.timeoutMs ?? DEFAULT_COMPACTION_TIMEOUT_MS);
     timer.unref();
     params.abortSignal?.addEventListener("abort", cancel, { once: true });
+    let exited = false;
+    void acp.exited.then(() => {
+        exited = true;
+        stopped = true;
+        wake();
+    });
     try {
         await acp.initialize();
         try {
@@ -111,6 +117,8 @@ export async function compactDevinSession(params, deps) {
             return failed("Compaction was aborted.", "aborted");
         if (timedOut)
             return failed("Devin compaction timed out.", "timeout");
+        if (exited && status !== "completed")
+            return failed("devin acp exited during compaction.", "devin_exited");
         if (status !== "completed") {
             const detail = error ?? text.trim();
             return failed(detail ? `Devin did not compact: ${detail}` : "Devin did not compact the session.", status ? `devin_compaction_${status}` : "devin_compaction_not_started", result?.stopReason ? `stopReason=${result.stopReason}` : undefined);

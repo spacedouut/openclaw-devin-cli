@@ -47,6 +47,7 @@ export async function runDevinIsolatedCompletion(params, deps) {
         await acp.initialize();
         assertCurrent();
         sessionId = await acp.newSession(params.workspaceDir, []);
+        assertCurrent();
         await acp.setMode(sessionId, "ask");
         assertCurrent();
         const prompt = [params.systemPrompt.trim(), params.prompt].filter(Boolean).join("\n\n");
