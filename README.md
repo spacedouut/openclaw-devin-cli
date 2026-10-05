@@ -1,64 +1,79 @@
 # openclaw-devin-cli
 
-**Experiment:** an [OpenClaw](https://openclaw.ai) CLI-backend plugin that wires
-Cognition's [Devin CLI](https://github.com/CognitionAI/devin-cli) (`devin`) into
-OpenClaw's agent runtime, so a model ref like `devin-cli/opus` runs a turn
-through Devin CLI (driven over ACP via `devin acp`) instead of a native API provider.
+**Experiment:** an [OpenClaw](https://openclaw.ai) agent-harness plugin that
+runs Cognition's [Devin CLI](https://github.com/CognitionAI/devin-cli) (`devin`)
+as a native OpenClaw agent runtime. A model ref like `devin-cli/claude-opus-5-5`
+runs the turn through `devin acp` with Devin's own login, models and sessions,
+never through an upstream provider API.
 
 Status: experimental / alpha, verified end-to-end on OpenClaw 2026.9.6 +
-devin-cli 3000.11.x (`openclaw agent --local -m "…" --model devin-cli/opus`
-returns a real Devin reply; see [Testing](#testing)).
+devin-cli 3000.11.x (see [Testing](#testing)).
 
-## Why a bridge script?
+## How it works
 
-OpenClaw's CLI-backend contract (`CliBackendConfig`) expects the spawned
-process to emit JSON containing a `session_id` and the reply text under a
-`result`-style key. `devin -p` only prints the final assistant text, so a turn
-that ends right after a tool call (or a rejected tool approval) looks like an
-empty success and OpenClaw reports "CLI backend returned an empty response".
+The plugin registers two things with the same id, `devin-cli`:
 
-`bin/devin-openclaw-bridge.mjs` instead drives `devin acp` — Devin's Agent
-Client Protocol server (JSON-RPC over stdio). Per turn it:
+- a **provider**, which makes `devin-cli/<model>` refs resolvable, publishes
+  the model catalog and reasoning slider, and reports Devin's native login as
+  auth;
+- an **agent harness** (`api.registerAgentHarness`), which claims every
+  `devin-cli` route and runs the turn itself.
 
-1. Extracts OpenClaw's args (`--oc-prompt`, `--oc-system`, `--model`,
-   `--permission-mode`, `-r <sessionId>`).
-2. Spawns `devin acp --model <id>`, sends `initialize`, then `session/new`
-   (or `session/load` + `session/set_config_option model` on resume), and
-   `session/set_mode` (`dangerous`→`bypass`, `smart`→`smart`,
-   `accept-edits`→`accept-edits`, `auto`→`ask`).
-3. Sends `session/prompt` and collects `agent_message_chunk` text, tool-call
-   lifecycle updates, and usage. `session/request_permission` is answered by
-   the bridge (allow, except in `ask` mode), so tools never hang on a missing
-   TTY.
-4. Streams the turn to stdout as JSONL in Claude Code's `stream-json` shape
-   (`jsonlDialect: "claude-stream-json"`). Each text run plus the tool calls
-   that follow it is one assistant message and tool results are user
-   messages, so OpenClaw shows Devin's tool calls live and keeps pre-tool text
-   interleaved with them (as commentary) instead of merging all text into the
-   final reply:
+Per turn the harness (`src/harness-attempt.ts`):
 
-   ```jsonl
-   {"type":"system","subtype":"session","session_id":"quilt-bubbler","model":"deepseek-v4-1-flash-high"}
-   {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_1",…}}}
-   {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
-   {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll run it."}}}
-   {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
-   {"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_…","name":"exec","input":{"command":"uname -r"}}}}
-   {"type":"stream_event","event":{"type":"content_block_stop","index":1}}
-   {"type":"stream_event","event":{"type":"message_stop"}}
-   {"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_…","content":"6.8.0-1061-aws","is_error":false}]}}
-   {"type":"stream_event","event":{"type":"message_start","message":{"id":"devin_msg_2",…}}}
-   {"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}
-   {"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Kernel is 6.8.0-1061-aws."}}}
-   {"type":"stream_event","event":{"type":"content_block_stop","index":0}}
-   {"type":"stream_event","event":{"type":"message_stop"}}
-   {"type":"result","subtype":"success","result":"Kernel is 6.8.0-1061-aws.","session_id":"quilt-bubbler","usage":{…}}
+1. Persists the user turn, spawns `devin acp --model <id>`, sends
+   `initialize` (as client `devin-cli`, with `DEVIN_PREFER_EXEC_TOOL=true`),
+   then `session/load` for the Devin session bound to this OpenClaw session,
+   or `session/new` for a new one (`session/set_mode`: `dangerous`→`bypass`,
+   `smart`→`smart`, `accept-edits`→`accept-edits`, `auto`→`ask`).
+2. Sends `session/prompt`. The first turn of a Devin session carries
+   OpenClaw's bootstrap/system context and any earlier OpenClaw history.
+3. Mirrors Devin's ACP updates into the OpenClaw transcript as they arrive,
+   the same way the built-in runtime stores a turn:
+
+   ```text
+   assistant  [text "Checking the kernel.", toolCall exec {command: "uname -r"}]
+   toolResult exec → "6.8.0-1061-aws"
+   assistant  [text "Now the hostname.",    toolCall exec {command: "hostname"}]
+   toolResult exec → "devin-box"
+   assistant  [text "devin-box runs 6.8.0-1061-aws."]
    ```
 
-   If Devin ends a turn without any text, the bridge streams a summary of the
-   stop reason and tool activity as the reply instead of leaving it empty.
-   Cancellations, refusals and ACP errors end with
-   `{"type":"result","status":"error",…}`.
+   Each group (assistant message + all of its tool results) is written
+   atomically with stable idempotency keys, and live tool start/result events
+   share Devin's tool-call id, so tool cards finish instead of staying
+   "Running". A tool that never reports back gets an error result when the
+   turn ends.
+4. If Devin ends a turn without any text, the final message is a summary of
+   the stop reason and tool activity, so the turn is never empty.
+5. Root-agent `agent_thought_chunk` updates stream as OpenClaw reasoning
+   (`onReasoningStream` / `thinking` events) and are stored as `thinking`
+   blocks on the assistant message they led to. Subagent reasoning is dropped.
+6. Messages steered into an active run (`/steer`, `/queue steer`) are
+   persisted to the transcript and sent to Devin as another `session/prompt`
+   on the same session; Devin folds them into the running turn.
+7. Root-agent `usage_update`s stream as OpenClaw `usage` events (context
+   occupancy `used` / window `size`, per-call tokens) and feed the turn's
+   usage, context window and `contextUsage`.
+
+Compaction Devin starts on its own is inferred: when Devin's active context
+drops sharply between model calls (including across turns of a resumed
+session) the harness reports a completed `compaction` event and
+`compactionCount`; `isCompacting()` is only true while that event is being
+reported.
+
+OpenClaw's `/compact` runs Devin's own `/compact` (with any custom
+instructions) on the bound Devin session. The harness answers Devin's
+`_cognition.ai/compaction` lifecycle requests and returns Devin's summary as a
+`native-harness` compaction result. Devin may decline to compact short
+sessions; that, a failed/cancelled compaction, a missing or other-workspace
+binding, an unresumable session, abort and timeout are all reported as
+compaction failures or no-ops. Devin sends no usage update after compacting,
+so the post-compaction context size is unknown until the next turn.
+
+Devin session ids are kept per OpenClaw session in
+`<stateDir>/plugins/devin-cli/sessions.json`; OpenClaw session reset or
+deletion drops the binding so the next turn starts a fresh Devin session.
 
 ## Install
 
@@ -89,6 +104,7 @@ openclaw plugins enable devin-cli --accept-capabilities
       "devin-cli": {
         "config": {
           // "command": "devin",            // binary name or absolute path
+          // "tools": "openclaw",           // openclaw | both | devin (see "OpenClaw tools")
           // "permissionMode": "smart",     // auto | accept-edits | smart | dangerous
           // "modelAliases": { "max": "swe-2-max" } // custom short ids -> devin --model ids
           // "autoReasoningFamilies": true, // one model per family; thinking level picks the variant
@@ -104,8 +120,65 @@ openclaw plugins enable devin-cli --accept-capabilities
 plugin mirrors OpenClaw's own exec policy: a `full` exec mode grants Devin
 `dangerous` (bypass all approvals); anything else defaults to `smart`, which
 auto-runs actions a fast model judges safe. Permission prompts Devin still
-raises are auto-approved by the bridge, except in `auto` (ACP `ask`, read-only).
-Side-question executions are forced to `auto` regardless.
+raises are auto-approved by the harness, except in `auto` (ACP `ask`, read-only),
+where they are rejected.
+
+## OpenClaw tools
+
+Each turn the harness builds OpenClaw's tool set for that run (same policy,
+allowlists, sandbox, approvals and hooks as OpenClaw's built-in runtime) and
+serves it to Devin over MCP: a per-turn streamable-HTTP server on `127.0.0.1`,
+guarded by a random bearer token, passed to `devin acp` in `session/new` /
+`session/load` as the `openclaw` MCP server and closed when the turn ends.
+
+- `openclaw` (default): Devin's built-in tools (exec, read/write/edit, grep,
+  web, subagents, ...) are switched off through a generated Devin config
+  (`disabled_tools`, merged over your `~/.config/devin/config.json` and passed
+  with `devin --config`). Devin keeps only its MCP client controls
+  (`mcp_list_tools`, `mcp_call_tool`, ...) and `skill`, so every action goes
+  through an OpenClaw tool.
+- `both`: Devin keeps its built-in tools; OpenClaw tools that duplicate them
+  (`read`, `write`, `edit`, `apply_patch`, `exec`, `process`, `web_search`,
+  `web_fetch`) are left out of the MCP server.
+- `devin`: no `openclaw` MCP server; Devin's built-in tools only.
+
+## OpenClaw's configured MCP servers
+
+MCP servers configured in OpenClaw (`mcp.servers` and plugin-bundled servers)
+are passed to Devin as their own ACP MCP servers, next to `openclaw`, in every
+tool mode. Devin connects to them directly, so OpenClaw's native tools and each
+external server stay separate layers. Session overrides (`/mcp` server toggles,
+`toolsAllow`, disabled tools) decide which servers a turn gets, and server
+names are sanitized the same way OpenClaw names them (a server called
+`openclaw` becomes `openclaw-2`). `${VAR}` header placeholders are resolved
+from the gateway's environment when the session starts.
+
+A server is left out, with a warning in the gateway log, when Devin can't
+enforce what OpenClaw would: per-tool filters or session tool denials,
+`codex.defaultToolsApprovalMode` `prompt`/`approve`, OAuth (`auth: "oauth"`),
+a stdio `cwd`, a missing header env var, and requester-scoped servers.
+
+Their calls show up under OpenClaw's own MCP tool names, `<server>__<tool>`
+(e.g. `cua-driver__screenshot`), with the tool's own arguments.
+
+OpenClaw tool calls show up as the OpenClaw tool itself in the transcript and
+tool cards: `mcp__openclaw__read` and `mcp_call_tool` on the `openclaw` server
+are both reported as `read` with the tool's own arguments, without Devin's
+"Calling read from openclaw" title. Devin's `mcp_list_tools` lookups against
+the `openclaw` server are not shown.
+
+## Session titles and utility completions
+
+The harness implements OpenClaw's isolated completion, so OpenClaw's own
+session-title generator (and other short utility prompts) run through Devin
+instead of failing and leaving a random slug. Each call starts a throwaway
+`devin acp` session with Devin's built-in tools disabled, no MCP servers and
+read-only (`ask`) mode; if Devin still tries a tool or asks for a permission,
+the completion fails closed.
+
+Titles use the plugin's default utility model, `devin-cli/swe-2`, unless
+`agents.defaults.utilityModel` is set. A title you set yourself (rename /
+label) always wins over the generated one.
 
 ## Reasoning families
 
@@ -161,22 +234,35 @@ openclaw agent --local -m "hello" --model devin-cli/sonnet      # Devin alias ->
 # or interactively: openclaw chat, then /model devin-cli/opus
 ```
 
-> `openclaw infer model run` / `capability model run` only drives the
-> OpenAI-compatible HTTP transport — it cannot exercise CLI backends
-> (`codex` errors there for the same reason). Use `openclaw agent --local`,
-> `openclaw chat`, or the gateway agent path.
-
 Unmapped ids also pass straight through to `devin --model`, so refs keep
 working even for models missing from the catalog. Add your own short names
 via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
 
-- **Session resume:** the ACP `session/new` id is returned as `session_id`;
-  later turns reload it with ACP `session/load`.
-- **System prompts:** appended to the first turn's prompt (Devin CLI has no
-  native system-prompt flag).
-- **Images / MCP probing:** disabled in `liveTest` (`defaultImageProbe`,
-  `defaultMcpProbe` false) — the bridge currently sends text-only prompts and
-  no MCP servers.
+- **Images:** every `devin-cli` model is reported as accepting text + image
+  input (Devin advertises ACP `promptCapabilities.image` and handles images for
+  every model family), so OpenClaw passes attachments and image tool results
+  through as ACP image blocks instead of dropping them.
+
+### Quota usage
+
+`openclaw status --usage` (and the other OpenClaw usage surfaces) show Devin
+account quota. `src/devin-quota.ts` reads the API key `devin auth login` stores
+in `credentials.toml` and calls the same `GetUserStatus` endpoint as Devin's own
+`/usage`, mapping daily/weekly quota windows (hidden ones are skipped), ACU
+limits, plan name, and overage balance:
+
+```text
+Devin CLI (Max)
+  Weekly: 98% left · resets 5d 15h
+  Overage balance: $100.00
+```
+
+The provider's `resolveUsageAuth`/`fetchUsageSnapshot` (declared via
+`contracts.usageProviders`) are authoritative; the harness exposes the same
+`fetchUsageSnapshot` for runtime-resolved lookups. The manifest's
+`setup.providers[].authEvidence` points OpenClaw at
+`${XDG_DATA_HOME:-~/.local/share}/devin/credentials.toml`, so usage is only
+queried once Devin is logged in.
 
 ## Caveats / open questions
 
@@ -194,36 +280,32 @@ via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
 npm install
 npm run check   # tsc --noEmit equivalent via build
 npm run build   # compiles src/ -> dist/
-npm test        # reasoning-family resolution (node:test, runs against dist/)
-```
-
-Manual smoke test without OpenClaw:
-
-```bash
-# register path
-node -e "import('./dist/index.js').then(m=>{
-  m.default.register({registerCliBackend:b=>console.log(b.config)})})"
-
-# bridge path (replace with a stub or a real devin binary)
-DEVIN_OPENCLAW_COMMAND=devin node bin/devin-openclaw-bridge.mjs \
-  --oc-prompt 'say hi' --model adaptive
+npm test        # reasoning families, transcript projection, quota parsing (node:test, runs against dist/)
 ```
 
 End-to-end in OpenClaw (needs a logged-in `devin`):
 
 ```bash
 openclaw plugins install -l /path/to/openclaw-devin-cli
-openclaw agent --local -m "hello" --model devin-cli/opus
+openclaw agent --local -m "hello" --model devin-cli/claude-opus-5-5 --thinking high
 ```
 
 ## Layout
 
 | path | role |
 | --- | --- |
-| `openclaw.plugin.json` | manifest (`cliBackends`, `modelCatalog`, `sessionRouteStateOwners`, config schema) |
-| `src/index.ts` | plugin entry: builds `CliBackendConfig`, permission-mode normalization |
+| `openclaw.plugin.json` | manifest (`providers`, `activation.onAgentHarnesses`, `modelCatalog`, config schema) |
+| `src/index.ts` | plugin entry: provider + harness registration, model/permission resolution |
+| `src/harness.ts` | `AgentHarnessV2`: route selection, reset/deletion/dispose |
+| `src/harness-attempt.ts` | one turn: ACP session, live events, transcript writes, attempt result |
+| `src/devin-acp.ts` | `devin acp` JSON-RPC client |
+| `src/turn-projector.ts` | ACP text/reasoning/tool events → typed assistant/toolResult messages |
+| `src/compaction.ts` | OpenClaw `/compact` → Devin `/compact` on the bound session |
+| `src/devin-quota.ts` | `/usage` quota: Devin credentials → `GetUserStatus` → usage snapshot |
+| `src/devin-usage.ts` | ACP `usage_update` → OpenClaw usage, context window, inferred compaction |
+| `src/session-bindings.ts` | OpenClaw session → Devin session id store |
 | `src/provider-discovery.ts` | catalog entry: `devin models list` -> model catalog, static fallback |
+| `src/reasoning-families.ts` | family + thinking level → Devin variant |
 | `src/sdk-shim.d.ts` | typings for untyped `openclaw/plugin-sdk/*` subpaths |
-| `bin/devin-openclaw-bridge.mjs` | runtime shim: spawn `devin`, recover session id, emit JSON |
 
 MIT — see [LICENSE](LICENSE).

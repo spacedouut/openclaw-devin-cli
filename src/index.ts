@@ -1,29 +1,24 @@
 /**
- * openclaw-devin-cli — registers Cognition's Devin CLI as an OpenClaw CLI
- * backend. Model refs look like `devin-cli/opus`.
+ * openclaw-devin-cli — runs Cognition's Devin CLI as a native OpenClaw agent
+ * harness. Model refs look like `devin-cli/claude-opus-5-5`.
  *
- * A bundled bridge (bin/devin-openclaw-bridge.mjs) drives `devin acp` over the
- * Agent Client Protocol and wraps the turn in the JSON record OpenClaw parses,
- * carrying Devin's native session id so `-r <sessionId>` resume works.
+ * The `devin-cli` provider owns model refs, catalog and auth status; the
+ * `devin-cli` harness claims those routes and drives `devin acp` directly,
+ * mirroring each text run, tool call and tool result into the transcript.
  */
 import { execFile } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import {
   definePluginEntry,
   type OpenClawConfig,
   type OpenClawPluginApi,
   type ProviderRuntimeModel,
 } from "openclaw/plugin-sdk/plugin-entry";
-import {
-  CLI_FRESH_WATCHDOG_DEFAULTS,
-  CLI_RESUME_WATCHDOG_DEFAULTS,
-  type CliBackendConfig,
-  type CliBackendNormalizeConfigContext,
-  type CliBackendResolveExecutionArgsContext,
-} from "openclaw/plugin-sdk/cli-backend";
+import type { AgentHarnessAttemptParamsV2 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { resolveExecModePolicy } from "openclaw/plugin-sdk/exec-approvals-runtime";
 import { resolveAgentConfig } from "openclaw/plugin-sdk/agent-scope-runtime";
 import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-runtime";
+import { createDevinHarness } from "./harness.js";
+import type { DevinToolSurface } from "./harness-attempt.js";
 import {
   devinCliCatalog,
   devinCommand,
@@ -38,22 +33,21 @@ import {
   resolveFamilyVariant,
   type ReasoningFamilyConfig,
 } from "./reasoning-families.js";
+import {
+  DEVIN_USAGE_PROVIDER_ID,
+  fetchDevinUsageForContext,
+  readDevinCredentials,
+} from "./devin-quota.js";
 
-// The real `CliBackendPlugin` type is only re-exported from plugin-entry under
-// a minified alias; deriving it from the typed API signature is more stable.
-type CliBackendPlugin = Parameters<OpenClawPluginApi["registerCliBackend"]>[0];
 type ProviderPlugin = Parameters<OpenClawPluginApi["registerProvider"]>[0];
 
-const BACKEND_ID = "devin-cli";
-const PERMISSION_MODE_ARG = "--permission-mode";
-const MODEL_OVERRIDE_ARG = "--oc-model";
-const BRIDGE_PATH = fileURLToPath(
-  new URL("../bin/devin-openclaw-bridge.mjs", import.meta.url),
-);
+const PROVIDER_ID = "devin-cli";
 
 type DevinCliPluginConfig = {
   /** devin binary name or absolute path (default "devin" on PATH). */
   command?: string;
+  /** Tools Devin gets: OpenClaw's over MCP (default), both, or Devin's own. */
+  tools?: DevinToolSurface;
   /** Devin CLI --permission-mode override. */
   permissionMode?: "auto" | "accept-edits" | "smart" | "dangerous";
   /** Extra/override OpenClaw model ids -> `devin --model` ids. */
@@ -64,57 +58,22 @@ type DevinCliPluginConfig = {
   reasoningFamilies?: Record<string, ReasoningFamilyConfig>;
 };
 
-function pluginConfig(context?: CliBackendNormalizeConfigContext): DevinCliPluginConfig {
-  const raw = resolvePluginConfigObject(context?.config, BACKEND_ID);
-  return (raw ?? {}) as DevinCliPluginConfig;
+function pluginConfig(config: OpenClawConfig | undefined): DevinCliPluginConfig {
+  return (resolvePluginConfigObject(config, PROVIDER_ID) ?? {}) as DevinCliPluginConfig;
 }
 
-/** Mirror the bundled claude-cli adapter: full-exec OpenClaw runs get Devin's
- * "approve everything" mode; other runs default to `smart`, which auto-runs
- * actions a fast model judges safe. The bridge maps these onto ACP session
- * modes and answers any remaining ACP permission requests itself. */
-function resolvePermissionMode(context?: CliBackendNormalizeConfigContext): string {
-  const agentExec = context?.agentId
-    ? resolveAgentConfig(context?.config ?? {}, context.agentId)?.tools?.exec
-    : undefined;
-  const exec = agentExec ?? context?.config?.tools?.exec;
+/** Full-exec OpenClaw runs get Devin's "approve everything" mode; other runs
+ * default to `smart`, which auto-runs actions a fast model judges safe. */
+function resolvePermissionMode(config: OpenClawConfig | undefined, agentId?: string): string {
+  const agentExec = agentId ? resolveAgentConfig(config ?? {}, agentId)?.tools?.exec : undefined;
+  const exec = agentExec ?? config?.tools?.exec;
   const execFull =
     resolveExecModePolicy({
       mode: exec?.mode,
       security: exec?.security ?? "full",
       ask: exec?.ask ?? "off",
     }).mode === "full";
-  return pluginConfig(context).permissionMode ?? (execFull ? "dangerous" : "smart");
-}
-
-function withPermissionMode(args: string[] | undefined, mode: string): string[] {
-  const next = [...(args ?? [])];
-  const index = next.indexOf(PERMISSION_MODE_ARG);
-  if (index >= 0 && index + 1 < next.length) {
-    next[index + 1] = mode;
-  } else {
-    next.push(PERMISSION_MODE_ARG, mode);
-  }
-  return next;
-}
-
-function normalizeDevinBackendConfig(
-  config: CliBackendConfig,
-  context?: CliBackendNormalizeConfigContext,
-): CliBackendConfig {
-  const command = pluginConfig(context).command;
-  const modelAliases = pluginConfig(context).modelAliases;
-  return {
-    ...config,
-    args: withPermissionMode(config.args, resolvePermissionMode(context)),
-    resumeArgs: withPermissionMode(config.resumeArgs, resolvePermissionMode(context)),
-    ...(command
-      ? { env: { ...(config.env ?? {}), DEVIN_OPENCLAW_COMMAND: command } }
-      : {}),
-    ...(modelAliases
-      ? { modelAliases: { ...(config.modelAliases ?? {}), ...modelAliases } }
-      : {}),
-  };
+  return pluginConfig(config).permissionMode ?? (execFull ? "dangerous" : "smart");
 }
 
 function findFamily(config: OpenClawConfig | undefined, modelId: string) {
@@ -122,74 +81,18 @@ function findFamily(config: OpenClawConfig | undefined, modelId: string) {
   return findReasoningFamily(reasoningFamiliesFor(config, catalog).families, modelId);
 }
 
-/** Per run: map a reasoning family + OpenClaw thinking level (and fast mode)
- * to the Devin variant, and pin side-question (/btw) turns to Devin's
- * read-mostly "auto" permission mode. */
-function resolveDevinExecutionArgs(
-  ctx: CliBackendResolveExecutionArgsContext,
-): readonly string[] | undefined {
-  const match = findFamily(ctx.config, ctx.modelId);
+/** OpenClaw model id + thinking level (and fast mode) -> `devin --model` id. */
+function resolveDevinModel(
+  input: Pick<AgentHarnessAttemptParamsV2, "config" | "modelId"> &
+    Partial<Pick<AgentHarnessAttemptParamsV2, "thinkLevel" | "fastMode">>,
+): string {
+  const alias = pluginConfig(input.config).modelAliases?.[input.modelId];
+  if (alias) return alias;
+  const match = findFamily(input.config, input.modelId);
   const variant = match
-    ? resolveFamilyVariant(match.family, ctx.thinkingLevel, ctx.fastMode === true)
+    ? resolveFamilyVariant(match.family, input.thinkLevel, input.fastMode === true)
     : undefined;
-  if (!variant && ctx.executionMode !== "side-question") {
-    return undefined;
-  }
-  let args = [...ctx.baseArgs];
-  if (ctx.executionMode === "side-question") {
-    args = withPermissionMode(args, "auto");
-  }
-  if (variant) {
-    args.push(MODEL_OVERRIDE_ARG, variant);
-  }
-  return args;
-}
-
-// Devin's own family aliases (sonnet, opus, codex, ...) resolve natively.
-const DEVIN_MODEL_ALIASES: Record<string, string> = {};
-
-function buildDevinCliBackend(): CliBackendPlugin {
-  return {
-    id: BACKEND_ID,
-    liveTest: {
-      defaultModelRef: "devin-cli/opus",
-      defaultImageProbe: false,
-      defaultMcpProbe: false,
-    },
-    // Devin's native tool set is always available; there is no flag to turn it
-    // off, so exact tool-availability runs correctly fail closed for now.
-    nativeToolMode: "always-on",
-    normalizeConfig: normalizeDevinBackendConfig,
-    resolveExecutionArgs: resolveDevinExecutionArgs,
-    config: {
-      // Spawn the bridge with the same runtime that loaded this plugin (node or bun).
-      command: process.execPath,
-      args: [BRIDGE_PATH, "--oc-prompt", "{prompt}"],
-      resumeArgs: [BRIDGE_PATH, "-r", "{sessionId}", "--oc-prompt", "{prompt}"],
-      output: "jsonl",
-      resumeOutput: "jsonl",
-      // The bridge re-emits ACP updates in Claude Code's stream-json shape so
-      // OpenClaw streams tool events live and keeps pre-tool text as commentary.
-      jsonlDialect: "claude-stream-json",
-      input: "arg",
-      modelArg: "--model",
-      modelAliases: DEVIN_MODEL_ALIASES,
-      // OpenClaw's system prompt rides into the prompt body via a bridge flag:
-      // Devin ACP sessions have no system-prompt field.
-      systemPromptArg: "--oc-system",
-      systemPromptWhen: "first",
-      systemPromptMode: "append",
-      sessionMode: "existing",
-      sessionIdFields: ["session_id"],
-      reliability: {
-        watchdog: {
-          fresh: { ...CLI_FRESH_WATCHDOG_DEFAULTS },
-          resume: { ...CLI_RESUME_WATCHDOG_DEFAULTS },
-        },
-      },
-      serialize: true,
-    },
-  };
+  return variant ?? input.modelId;
 }
 
 /**
@@ -202,14 +105,14 @@ function buildDevinCliBackend(): CliBackendPlugin {
  */
 function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlugin {
   return {
-    id: BACKEND_ID,
+    id: PROVIDER_ID,
     label: "Devin CLI",
     docsPath: "/providers/models",
     envVars: [],
     auth: [],
     staticCatalog: {
       order: "simple",
-      run: async () => ({ providers: { [BACKEND_ID]: staticProvider() } }),
+      run: async () => ({ providers: { [PROVIDER_ID]: staticProvider() } }),
     },
     catalog: {
       order: "simple",
@@ -218,7 +121,7 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
     // Devin CLI owns its own login (devin auth login); surface it as the
     // provider's credential so runs don't demand a models.providers API key.
     prepareSyntheticAuth: async ({ provider, env = process.env, signal }) => {
-      if (provider?.toLowerCase() !== BACKEND_ID) {
+      if (provider?.toLowerCase() !== PROVIDER_ID) {
         return undefined;
       }
       signal?.throwIfAborted();
@@ -235,6 +138,16 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
         ? { apiKey: "openclaw:devin-cli-native-auth", source: "Devin CLI native auth", mode: "oauth" as const }
         : undefined;
     },
+    // `/usage`: the manifest's authEvidence gates on Devin's credentials file;
+    // the key in it authenticates the same quota call Devin's own `/usage` makes.
+    resolveUsageAuth: async ({ provider, env }) => {
+      if (provider?.toLowerCase() !== DEVIN_USAGE_PROVIDER_ID) {
+        return undefined;
+      }
+      const credentials = await readDevinCredentials(env);
+      return credentials ? { token: credentials.apiKey } : { handled: true as const };
+    },
+    fetchUsageSnapshot: fetchDevinUsageForContext,
     resolveThinkingProfile: ({ modelId }) => {
       const match = findFamily(config, modelId);
       if (!match) {
@@ -259,14 +172,13 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
       return {
         id: modelId,
         name: modelId,
-        provider: BACKEND_ID,
-        // api/baseUrl are inert for CLI providers: execution routes through the
-        // registered devin-cli backend, not HTTP transport. Same default shape
-        // bundled claude-cli catalog rows resolve to.
+        provider: PROVIDER_ID,
+        // api/baseUrl are inert: the devin-cli harness executes these models
+        // natively through `devin acp`, never over HTTP transport.
         api: "openai-responses",
         baseUrl: "",
         reasoning: Boolean(match),
-        input: ["text"],
+        input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: match?.family.contextWindow ?? 262_000,
         maxTokens: match?.family.maxTokens ?? 128_000,
@@ -276,11 +188,23 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
 }
 
 export default definePluginEntry({
-  id: BACKEND_ID,
+  id: PROVIDER_ID,
   name: "Devin CLI",
-  description: "Run Cognition's Devin CLI through OpenClaw",
+  description: "Run Cognition's Devin CLI as a native OpenClaw agent runtime",
   register(api) {
-    api.registerCliBackend(buildDevinCliBackend());
     api.registerProvider(buildDevinCliProvider(api.config));
+    api.registerAgentHarness(
+      createDevinHarness({
+        providerId: PROVIDER_ID,
+        stateDir: () => api.runtime.state.resolveStateDir(),
+        command: () => devinCommand({ config: api.config }),
+        resolveModel: resolveDevinModel,
+        resolvePermissionMode: (input) => resolvePermissionMode(input.config, input.agentId),
+        resolveToolSurface: (input) => pluginConfig(input.config).tools ?? "openclaw",
+        resolveIsolatedModel: (input) =>
+          resolveDevinModel({ config: input.config, modelId: input.modelId, thinkLevel: input.thinkLevel }),
+        logger: api.logger,
+      }),
+    );
   },
 });
