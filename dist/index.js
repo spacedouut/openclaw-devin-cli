@@ -14,6 +14,7 @@ import { resolvePluginConfigObject } from "openclaw/plugin-sdk/plugin-config-run
 import { createDevinHarness } from "./harness.js";
 import { devinCliCatalog, devinCommand, reasoningFamiliesFor, staticProvider, } from "./provider-discovery.js";
 import { familyDefaultLevel, familyLevels, findReasoningFamily, loadDevinCatalogSync, resolveFamilyVariant, } from "./reasoning-families.js";
+import { DEVIN_USAGE_PROVIDER_ID, fetchDevinUsageForContext, readDevinCredentials, } from "./devin-quota.js";
 const PROVIDER_ID = "devin-cli";
 function pluginConfig(config) {
     return (resolvePluginConfigObject(config, PROVIDER_ID) ?? {});
@@ -83,6 +84,16 @@ function buildDevinCliProvider(config) {
                 ? { apiKey: "openclaw:devin-cli-native-auth", source: "Devin CLI native auth", mode: "oauth" }
                 : undefined;
         },
+        // `/usage`: the manifest's authEvidence gates on Devin's credentials file;
+        // the key in it authenticates the same quota call Devin's own `/usage` makes.
+        resolveUsageAuth: async ({ provider, env }) => {
+            if (provider?.toLowerCase() !== DEVIN_USAGE_PROVIDER_ID) {
+                return undefined;
+            }
+            const credentials = await readDevinCredentials(env);
+            return credentials ? { token: credentials.apiKey } : { handled: true };
+        },
+        fetchUsageSnapshot: fetchDevinUsageForContext,
         resolveThinkingProfile: ({ modelId }) => {
             const match = findFamily(config, modelId);
             if (!match) {

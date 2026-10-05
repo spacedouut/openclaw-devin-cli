@@ -243,6 +243,27 @@ via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
   every model family), so OpenClaw passes attachments and image tool results
   through as ACP image blocks instead of dropping them.
 
+### Quota usage
+
+`openclaw status --usage` (and the other OpenClaw usage surfaces) show Devin
+account quota. `src/devin-quota.ts` reads the API key `devin auth login` stores
+in `credentials.toml` and calls the same `GetUserStatus` endpoint as Devin's own
+`/usage`, mapping daily/weekly quota windows (hidden ones are skipped), ACU
+limits, plan name, and overage balance:
+
+```text
+Devin CLI (Max)
+  Weekly: 98% left · resets 5d 15h
+  Overage balance: $100.00
+```
+
+The provider's `resolveUsageAuth`/`fetchUsageSnapshot` (declared via
+`contracts.usageProviders`) are authoritative; the harness exposes the same
+`fetchUsageSnapshot` for runtime-resolved lookups. The manifest's
+`setup.providers[].authEvidence` points OpenClaw at
+`${XDG_DATA_HOME:-~/.local/share}/devin/credentials.toml`, so usage is only
+queried once Devin is logged in.
+
 ## Caveats / open questions
 
 - **Auth required.** `devin` must be logged in (`devin auth login`); the
@@ -259,7 +280,7 @@ via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
 npm install
 npm run check   # tsc --noEmit equivalent via build
 npm run build   # compiles src/ -> dist/
-npm test        # reasoning families + transcript projection (node:test, runs against dist/)
+npm test        # reasoning families, transcript projection, quota parsing (node:test, runs against dist/)
 ```
 
 End-to-end in OpenClaw (needs a logged-in `devin`):
@@ -280,6 +301,7 @@ openclaw agent --local -m "hello" --model devin-cli/claude-opus-5-5 --thinking h
 | `src/devin-acp.ts` | `devin acp` JSON-RPC client |
 | `src/turn-projector.ts` | ACP text/reasoning/tool events → typed assistant/toolResult messages |
 | `src/compaction.ts` | OpenClaw `/compact` → Devin `/compact` on the bound session |
+| `src/devin-quota.ts` | `/usage` quota: Devin credentials → `GetUserStatus` → usage snapshot |
 | `src/devin-usage.ts` | ACP `usage_update` → OpenClaw usage, context window, inferred compaction |
 | `src/session-bindings.ts` | OpenClaw session → Devin session id store |
 | `src/provider-discovery.ts` | catalog entry: `devin models list` -> model catalog, static fallback |
