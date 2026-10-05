@@ -9,6 +9,7 @@ import type {
   AgentHarnessV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { compactDevinSession } from "./compaction.js";
+import { fetchDevinUsageForContext } from "./devin-quota.js";
 import { runDevinAttempt, type DevinAttemptDeps, type DevinToolSurface } from "./harness-attempt.js";
 import { runDevinIsolatedCompletion, type IsolatedCompletionParams } from "./isolated-completion.js";
 import { DevinSessionBindings } from "./session-bindings.js";
@@ -95,6 +96,9 @@ export function createDevinHarness(params: {
         },
       });
     },
+    // Same quota as the provider hook (which stays authoritative), for usage
+    // lookups that resolve through the runtime instead of the provider.
+    fetchUsageSnapshot: fetchDevinUsageForContext,
     dispose: () => {
       generation.abort();
     },

@@ -1,4 +1,5 @@
 import { compactDevinSession } from "./compaction.js";
+import { fetchDevinUsageForContext } from "./devin-quota.js";
 import { runDevinAttempt } from "./harness-attempt.js";
 import { runDevinIsolatedCompletion } from "./isolated-completion.js";
 import { DevinSessionBindings } from "./session-bindings.js";
@@ -69,6 +70,9 @@ export function createDevinHarness(params) {
                 },
             });
         },
+        // Same quota as the provider hook (which stays authoritative), for usage
+        // lookups that resolve through the runtime instead of the provider.
+        fetchUsageSnapshot: fetchDevinUsageForContext,
         dispose: () => {
             generation.abort();
         },

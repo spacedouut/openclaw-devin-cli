@@ -17,6 +17,9 @@
       "authProfilePrefixes": ["devin-cli:"]
     }
   ],
+  "contracts": {
+    "usageProviders": ["devin-cli"]
+  },
   "providerCatalogEntry": "./dist/provider-discovery.js",
   "modelCatalog": {
     "providers": {
@@ -37,7 +40,23 @@
     "discovery": { "devin-cli": "runtime" }
   },
   "setup": {
-      "requiresRuntime": false
+    "providers": [
+      {
+        "id": "devin-cli",
+        "authEvidence": [
+          {
+            "type": "local-file-with-env",
+            "fallbackPaths": [
+              "${XDG_DATA_HOME}/devin/credentials.toml",
+              "${HOME}/.local/share/devin/credentials.toml"
+            ],
+            "credentialMarker": "openclaw:devin-cli-native-auth",
+            "source": "Devin CLI native auth"
+          }
+        ]
+      }
+    ],
+    "requiresRuntime": false
   },
   "activation": {
     "onStartup": false,
