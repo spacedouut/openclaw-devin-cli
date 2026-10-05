@@ -38,6 +38,11 @@ import {
   resolveFamilyVariant,
   type ReasoningFamilyConfig,
 } from "./reasoning-families.js";
+import {
+  DEVIN_USAGE_PROVIDER_ID,
+  fetchDevinUsageSnapshot,
+  readDevinCredentials,
+} from "./usage.js";
 
 // The real `CliBackendPlugin` type is only re-exported from plugin-entry under
 // a minified alias; deriving it from the typed API signature is more stable.
@@ -235,6 +240,21 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
         ? { apiKey: "openclaw:devin-cli-native-auth", source: "Devin CLI native auth", mode: "oauth" as const }
         : undefined;
     },
+    // `/usage`: the manifest's authEvidence gates on Devin's credentials file;
+    // the key in it authenticates the same quota call Devin's own `/usage` makes.
+    resolveUsageAuth: async ({ provider, env }) => {
+      if (provider?.toLowerCase() !== DEVIN_USAGE_PROVIDER_ID) {
+        return undefined;
+      }
+      const credentials = await readDevinCredentials(env);
+      return credentials ? { token: credentials.apiKey } : { handled: true as const };
+    },
+    fetchUsageSnapshot: async ({ token, env, fetchFn }) =>
+      await fetchDevinUsageSnapshot({
+        token,
+        apiServerUrl: (await readDevinCredentials(env))?.apiServerUrl,
+        fetchFn,
+      }),
     resolveThinkingProfile: ({ modelId }) => {
       const match = findFamily(config, modelId);
       if (!match) {

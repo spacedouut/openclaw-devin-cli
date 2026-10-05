@@ -178,6 +178,26 @@ via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
   `defaultMcpProbe` false) — the bridge currently sends text-only prompts and
   no MCP servers.
 
+### Quota usage
+
+`openclaw status --usage` (and the other OpenClaw usage surfaces) show Devin
+quota through the provider usage hooks (`contracts.usageProviders`,
+`resolveUsageAuth`, `fetchUsageSnapshot`). `src/usage.ts` reads the API key
+`devin auth login` stores in `credentials.toml` and calls the same
+`GetUserStatus` endpoint as Devin's own `/usage`, mapping the daily/weekly
+quota windows (hidden ones are skipped), ACU limits, plan name, and overage
+balance:
+
+```text
+Devin CLI (Max)
+  Weekly: 98% left · resets 5d 15h
+  Overage balance: $100.00
+```
+
+The manifest's `setup.providers[].authEvidence` points OpenClaw at
+`${XDG_DATA_HOME:-~/.local/share}/devin/credentials.toml`, so usage is only
+queried once Devin is logged in.
+
 ## Caveats / open questions
 
 - **Auth required.** `devin` must be logged in (`devin auth login`); the
@@ -194,7 +214,7 @@ via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
 npm install
 npm run check   # tsc --noEmit equivalent via build
 npm run build   # compiles src/ -> dist/
-npm test        # reasoning-family resolution (node:test, runs against dist/)
+npm test        # reasoning families + usage parsing (node:test, runs against dist/)
 ```
 
 Manual smoke test without OpenClaw:
@@ -222,6 +242,7 @@ openclaw agent --local -m "hello" --model devin-cli/opus
 | --- | --- |
 | `openclaw.plugin.json` | manifest (`cliBackends`, `modelCatalog`, `sessionRouteStateOwners`, config schema) |
 | `src/index.ts` | plugin entry: builds `CliBackendConfig`, permission-mode normalization |
+| `src/usage.ts` | `/usage` provider hook: Devin credentials -> `GetUserStatus` -> usage snapshot |
 | `src/provider-discovery.ts` | catalog entry: `devin models list` -> model catalog, static fallback |
 | `src/sdk-shim.d.ts` | typings for untyped `openclaw/plugin-sdk/*` subpaths |
 | `bin/devin-openclaw-bridge.mjs` | runtime shim: spawn `devin`, recover session id, emit JSON |
