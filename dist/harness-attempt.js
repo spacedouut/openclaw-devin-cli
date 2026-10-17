@@ -10,7 +10,7 @@ import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { appendSessionTranscriptMessageByIdentityStrict, appendSessionTranscriptMessagesByIdentity, publishSessionTranscriptUpdateByIdentity, } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { randomUUID } from "node:crypto";
-import { ACP_MODES, acpText, DevinAcpProcess, pickPermissionOption, } from "./devin-acp.js";
+import { ACP_MODES, AcpRequestError, acpText, DevinAcpProcess, pickPermissionOption, } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
 import { DevinUsageTracker } from "./devin-usage.js";
@@ -41,18 +41,21 @@ async function ensureDevinModel(acp, sessionId, requested, state, warn) {
         return;
     const family = devinFamily(requested);
     const sameFamily = devinFamily(state.current) === family;
+    let lastError;
     try {
         const next = await acp.setModel(sessionId, requested);
         if (next.current === undefined || devinFamily(next.current) === family)
             return;
-        throw new Error(`Devin reports ${next.current} after switching to ${requested}`);
+        throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${requested}`);
     }
     catch (error) {
-        if (sameFamily) {
-            warn?.(`devin-cli: Devin kept ${state.current}; it rejected ${requested} (${String(error)})`);
+        if (error instanceof AcpRequestError && sameFamily) {
+            warn?.(`devin-cli: Devin kept ${state.current}; it rejected ${requested} (${error.message})`);
             return;
         }
-        let lastError = error;
+        if (!(error instanceof AcpRequestError))
+            throw error;
+        lastError = error;
         for (const option of state.options.filter((id) => id !== requested && devinFamily(id) === family)) {
             try {
                 const next = await acp.setModel(sessionId, option);
@@ -60,9 +63,11 @@ async function ensureDevinModel(acp, sessionId, requested, state, warn) {
                     warn?.(`devin-cli: Devin rejected ${requested}; running ${next.current ?? option} instead`);
                     return;
                 }
-                lastError = new Error(`Devin reports ${next.current} after switching to ${option}`);
+                throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${option}`);
             }
             catch (optionError) {
+                if (!(optionError instanceof AcpRequestError))
+                    throw optionError;
                 lastError = optionError;
             }
         }
