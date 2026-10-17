@@ -14,7 +14,7 @@ import { ACP_MODES, acpText, DevinAcpProcess, pickPermissionOption, } from "./de
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
 import { DevinUsageTracker } from "./devin-usage.js";
-import { resolveDevinTool } from "./devin-tool-names.js";
+import { resolveDevinTool, stripMcpToolListing } from "./devin-tool-names.js";
 import { OPENCLAW_MCP_SERVER_NAME, startOpenClawMcpBridge, } from "./openclaw-mcp-server.js";
 import { buildOpenClawTools, DEVIN_OVERLAPPING_TOOLS } from "./openclaw-tools.js";
 import { DevinTurnProjector, } from "./turn-projector.js";
@@ -55,17 +55,6 @@ function openClawToolsNote(surface, toolNames, forwardedServers) {
         lines.push("Devin's built-in shell, file and web tools are disabled in this runtime; use the OpenClaw tools instead.");
     }
     return lines.join("\n");
-}
-function summarizeTools(tools) {
-    return [...tools]
-        .map((tool) => {
-        const status = tool.denied ? "permission denied" : (tool.status ?? "pending");
-        const tail = tool.output.trim()
-            ? `\n    ${tool.output.trim().split("\n").slice(-5).join("\n    ")}`
-            : "";
-        return `- ${tool.title || tool.name} (${status})${tail}`;
-    })
-        .join("\n");
 }
 function renderHistory(messages) {
     const lines = [];
@@ -324,7 +313,7 @@ export async function runDevinAttempt(input, deps) {
         if (!id)
             return;
         const previous = tools.get(id);
-        const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
+        const output = update.sessionUpdate === "tool_call_update" ? stripMcpToolListing(acpText(update.content)) : "";
         const resolved = resolveDevinTool(update, forwardedServerNames);
         const name = toolNameFor(resolved, update, previous);
         const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
@@ -363,7 +352,13 @@ export async function runDevinAttempt(input, deps) {
                 await endReasoning();
                 await closeLiveSegment();
                 projector?.toolStart({ id, name: next.name, args });
-                const toolData = { phase: "start", name: next.name, toolCallId: id, args };
+                const toolData = {
+                    phase: "start",
+                    name: next.name,
+                    toolCallId: id,
+                    args,
+                    hideFromChannelProgress: true,
+                };
                 await emit("item", projectAgentToolActivity(toolData));
                 await emit("tool", toolData);
             });
@@ -390,17 +385,13 @@ export async function runDevinAttempt(input, deps) {
                 args,
                 isError,
                 result: { content: [{ type: "text", text: output }] },
+                hideFromChannelProgress: true,
             };
             await emit("tool", toolData);
             await emit("item", projectAgentToolActivity({
                 ...toolData,
                 status: isError ? "failed" : "completed",
             }));
-            const emitOutput = typeof input.shouldEmitToolOutput === "function"
-                ? input.shouldEmitToolOutput()
-                : input.verboseLevel === "full";
-            if (emitOutput)
-                await input.onToolResult?.({ text: output });
             await writeGroups(projector?.takeReadyGroups() ?? []);
         });
     };
@@ -693,14 +684,9 @@ export async function runDevinAttempt(input, deps) {
         const finished = projector.finish({
             stopReason: cancelled ? "aborted" : stopReason === "refusal" ? "error" : "stop",
             usage: usage.turnUsage(result?.usage),
-            fallbackText: () => {
-                if (denied)
-                    return "Devin could not complete this turn because permission was not granted.";
-                const summary = summarizeTools(tools.values());
-                return summary
-                    ? `Devin ended the turn (${stopReason}) without a text reply. Tool activity:\n${summary}`
-                    : `Devin ended the turn (${stopReason}) without a text reply.`;
-            },
+            fallbackText: () => denied
+                ? "Devin could not complete this turn because permission was not granted."
+                : `Devin ended the turn (${stopReason}) without a text reply.`,
         });
         await writeGroups(finished.groups);
         if (finished.final) {

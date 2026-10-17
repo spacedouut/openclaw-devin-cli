@@ -43,7 +43,7 @@ import {
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
 import { DevinUsageTracker, type DevinUsageRecord } from "./devin-usage.js";
-import { resolveDevinTool, type DevinToolIdentity } from "./devin-tool-names.js";
+import { resolveDevinTool, stripMcpToolListing, type DevinToolIdentity } from "./devin-tool-names.js";
 import {
   OPENCLAW_MCP_SERVER_NAME,
   startOpenClawMcpBridge,
@@ -150,18 +150,6 @@ function openClawToolsNote(surface: DevinToolSurface, toolNames: string[], forwa
     lines.push("Devin's built-in shell, file and web tools are disabled in this runtime; use the OpenClaw tools instead.");
   }
   return lines.join("\n");
-}
-
-function summarizeTools(tools: Iterable<ToolState>): string {
-  return [...tools]
-    .map((tool) => {
-      const status = tool.denied ? "permission denied" : (tool.status ?? "pending");
-      const tail = tool.output.trim()
-        ? `\n    ${tool.output.trim().split("\n").slice(-5).join("\n    ")}`
-        : "";
-      return `- ${tool.title || tool.name} (${status})${tail}`;
-    })
-    .join("\n");
 }
 
 function renderHistory(messages: AgentMessage[]): string {
@@ -430,7 +418,7 @@ export async function runDevinAttempt(
     const id = update.toolCallId;
     if (!id) return;
     const previous = tools.get(id);
-    const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
+    const output = update.sessionUpdate === "tool_call_update" ? stripMcpToolListing(acpText(update.content)) : "";
     const resolved = resolveDevinTool(update, forwardedServerNames);
     const name = toolNameFor(resolved, update, previous);
     const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
@@ -468,7 +456,13 @@ export async function runDevinAttempt(
         await endReasoning();
         await closeLiveSegment();
         projector?.toolStart({ id, name: next.name, args });
-        const toolData = { phase: "start" as const, name: next.name, toolCallId: id, args };
+        const toolData = {
+          phase: "start" as const,
+          name: next.name,
+          toolCallId: id,
+          args,
+          hideFromChannelProgress: true,
+        };
         await emit("item", projectAgentToolActivity(toolData) as Record<string, unknown>);
         await emit("tool", toolData);
       });
@@ -496,6 +490,7 @@ export async function runDevinAttempt(
         args,
         isError,
         result: { content: [{ type: "text", text: output }] },
+        hideFromChannelProgress: true,
       };
       await emit("tool", toolData);
       await emit(
@@ -505,11 +500,6 @@ export async function runDevinAttempt(
           status: isError ? "failed" : "completed",
         }) as Record<string, unknown>,
       );
-      const emitOutput =
-        typeof input.shouldEmitToolOutput === "function"
-          ? input.shouldEmitToolOutput()
-          : input.verboseLevel === "full";
-      if (emitOutput) await input.onToolResult?.({ text: output });
       await writeGroups(projector?.takeReadyGroups() ?? []);
     });
   };
@@ -807,13 +797,10 @@ export async function runDevinAttempt(
     const finished = projector.finish({
       stopReason: cancelled ? "aborted" : stopReason === "refusal" ? "error" : "stop",
       usage: usage.turnUsage(result?.usage),
-      fallbackText: () => {
-        if (denied) return "Devin could not complete this turn because permission was not granted.";
-        const summary = summarizeTools(tools.values());
-        return summary
-          ? `Devin ended the turn (${stopReason}) without a text reply. Tool activity:\n${summary}`
-          : `Devin ended the turn (${stopReason}) without a text reply.`;
-      },
+      fallbackText: () =>
+        denied
+          ? "Devin could not complete this turn because permission was not granted."
+          : `Devin ended the turn (${stopReason}) without a text reply.`,
     });
     await writeGroups(finished.groups);
     if (finished.final) {
