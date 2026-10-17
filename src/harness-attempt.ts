@@ -122,33 +122,46 @@ function devinFamily(id: string): string {
 /**
  * Makes Devin run the model OpenClaw selected. `--model` is ignored on `session/load`, and an id
  * Devin does not know is silently replaced by its default (SWE-2), so the reported model is checked
- * and corrected through `set_config_option`, which only accepts the ids Devin lists.
+ * and corrected through `set_config_option`. A different effort/fast variant of the family Devin
+ * is already on is requested too; if Devin rejects that variant id the family stays as is (warned),
+ * while a different family Devin will not switch to fails the turn.
  */
 async function ensureDevinModel(
   acp: DevinAcpProcess,
   sessionId: string,
   requested: string,
   state: AcpModelState,
+  warn?: (message: string) => void,
 ): Promise<void> {
-  if (state.current === undefined || devinFamily(state.current) === devinFamily(requested)) return;
+  if (state.current === undefined || state.current.toLowerCase() === requested.toLowerCase()) return;
   const family = devinFamily(requested);
-  const candidates = [
-    requested,
-    ...state.options.filter((option) => option !== requested && devinFamily(option) === family),
-  ];
-  let lastError: unknown;
-  for (const candidate of candidates) {
-    try {
-      const next = await acp.setModel(sessionId, candidate);
-      if (next.current === undefined || devinFamily(next.current) === family) return;
-      lastError = new Error(`Devin reports ${next.current} after switching to ${candidate}`);
-    } catch (error) {
-      lastError = error;
+  const sameFamily = devinFamily(state.current) === family;
+  try {
+    const next = await acp.setModel(sessionId, requested);
+    if (next.current === undefined || devinFamily(next.current) === family) return;
+    throw new Error(`Devin reports ${next.current} after switching to ${requested}`);
+  } catch (error) {
+    if (sameFamily) {
+      warn?.(`devin-cli: Devin kept ${state.current}; it rejected ${requested} (${String(error)})`);
+      return;
     }
+    let lastError: unknown = error;
+    for (const option of state.options.filter((id) => id !== requested && devinFamily(id) === family)) {
+      try {
+        const next = await acp.setModel(sessionId, option);
+        if (next.current === undefined || devinFamily(next.current) === family) {
+          warn?.(`devin-cli: Devin rejected ${requested}; running ${next.current ?? option} instead`);
+          return;
+        }
+        lastError = new Error(`Devin reports ${next.current} after switching to ${option}`);
+      } catch (optionError) {
+        lastError = optionError;
+      }
+    }
+    throw new Error(
+      `devin-cli: Devin is running ${state.current} and would not switch to ${requested} (${String(lastError)})`,
+    );
   }
-  throw new Error(
-    `devin-cli: Devin is running ${state.current} and would not switch to ${requested} (${String(lastError)})`,
-  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -269,6 +282,7 @@ export async function runDevinAttempt(
   const messagingSentTargets: NonNullable<AgentHarnessAttemptResult["messagingToolSentTargets"]> = [];
 
   let usage: DevinUsageTracker | undefined;
+  let turnUsage: ReturnType<DevinUsageTracker["turnUsage"]> | undefined;
   let compacting = false;
   // Devin accepts `session/prompt` while a prompt is running and folds it into the active turn.
   let steerable = false;
@@ -753,7 +767,7 @@ export async function runDevinAttempt(
       modelState = created.model;
     }
     assertActive();
-    if (model && modelState) await ensureDevinModel(acp, devinSessionId, model, modelState);
+    if (model && modelState) await ensureDevinModel(acp, devinSessionId, model, modelState, deps.logger?.warn);
     assertActive();
     usage = new DevinUsageTracker(resumed ? binding?.contextTokens : undefined);
     deps.bindings.set(input.sessionId, {
@@ -846,6 +860,7 @@ export async function runDevinAttempt(
 
     const stopReason = result?.stopReason ?? "end_turn";
     cancelled = stopReason === "cancelled";
+    turnUsage = usage.turnUsage(result?.usage);
     const finished = projector.finish({
       stopReason: cancelled
         ? "aborted"
@@ -854,7 +869,7 @@ export async function runDevinAttempt(
           : stopReason === "max_tokens"
             ? "length"
             : "stop",
-      usage: usage.turnUsage(result?.usage),
+      usage: turnUsage,
     });
     await writeGroups(finished.groups);
     if (finished.final) {
@@ -922,7 +937,6 @@ export async function runDevinAttempt(
   }
 
   const toolCount = toolMetas.length;
-  const turnUsage = finalAssistant?.usage as ReturnType<DevinUsageTracker["turnUsage"]> | undefined;
   const attemptUsage = turnUsage
     ? {
         input: turnUsage.input,
