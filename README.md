@@ -245,9 +245,12 @@ openclaw agent --local -m "hello" --model devin-cli/sonnet      # Devin alias ->
 # or interactively: openclaw chat, then /model devin-cli/opus
 ```
 
-Unmapped ids also pass straight through to `devin --model`, so refs keep
-working even for models missing from the catalog. Add your own short names
-via `plugins.entries.devin-cli.config.modelAliases` in `openclaw.json`.
+Exact variant ids (`claude-opus-5-5-high-fast`) resolve from the catalog too.
+An id the catalog doesn't know gets no made-up context window; give it a
+`models.providers["devin-cli"].models` entry in `openclaw.json` if you need
+it. Add your own short names via
+`plugins.entries.devin-cli.config.modelAliases`; they report their target's
+numbers.
 
 - **Images:** every `devin-cli` model is reported as accepting text + image
   input (Devin advertises ACP `promptCapabilities.image` and handles images for

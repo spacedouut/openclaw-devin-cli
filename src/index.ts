@@ -81,6 +81,14 @@ function findFamily(config: OpenClawConfig | undefined, modelId: string) {
   return findReasoningFamily(reasoningFamiliesFor(config, catalog).families, modelId);
 }
 
+/** Exact `devin --model` variant id (e.g. `claude-opus-5-5-high-fast`) from Devin's catalog. */
+function findVariant(config: OpenClawConfig | undefined, modelId: string) {
+  const id = modelId.toLowerCase();
+  return loadDevinCatalogSync(devinCommand({ config }))
+    .flatMap((family) => family.variants ?? [])
+    .find((variant) => variant.model_uid?.toLowerCase() === id);
+}
+
 /** OpenClaw model id + thinking level (and fast mode) -> `devin --model` id. */
 function resolveDevinModel(
   input: Pick<AgentHarnessAttemptParamsV2, "config" | "modelId"> &
@@ -168,10 +176,17 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
       if (!modelId) {
         return undefined;
       }
-      const match = findFamily(config, modelId);
+      // A configured alias runs as its Devin target, so report that target's numbers.
+      const devinId = pluginConfig(config).modelAliases?.[modelId] ?? modelId;
+      const match = findFamily(config, devinId);
+      const variant = findVariant(config, devinId);
+      // Only Devin's own numbers go out; an invented window would cap OpenClaw's
+      // context projection (it keeps the smallest discovered value per model).
+      const contextWindow = match?.family.contextWindow ?? variant?.max_context_tokens;
+      if (!contextWindow) return undefined;
       return {
         id: modelId,
-        name: modelId,
+        name: variant?.label ?? modelId,
         provider: PROVIDER_ID,
         // api/baseUrl are inert: the devin-cli harness executes these models
         // natively through `devin acp`, never over HTTP transport.
@@ -180,8 +195,8 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
         reasoning: Boolean(match),
         input: ["text", "image"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: match?.family.contextWindow ?? 262_000,
-        maxTokens: match?.family.maxTokens ?? 128_000,
+        contextWindow,
+        maxTokens: match?.family.maxTokens ?? variant?.max_output_tokens ?? 128_000,
       };
     },
   };
