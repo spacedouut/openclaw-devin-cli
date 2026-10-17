@@ -22,6 +22,7 @@ import {
   type AgentHarnessAttemptParamsV2,
   type AgentHarnessAttemptResult,
   type AgentMessage,
+  type AnyAgentTool,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
@@ -33,10 +34,12 @@ import {
 import { randomUUID } from "node:crypto";
 import {
   ACP_MODES,
+  AcpRequestError,
   acpText,
   DevinAcpProcess,
   pickPermissionOption,
   type AcpMcpServer,
+  type AcpModelState,
   type AcpPromptResult,
   type AcpSessionUpdate,
 } from "./devin-acp.js";
@@ -110,6 +113,60 @@ function isRootUpdate(update: AcpSessionUpdate): boolean {
   return typeof parent !== "string" || parent === "root";
 }
 
+const DEVIN_VARIANT_SUFFIX = /-(?:none|minimal|low|medium|high|xhigh|max)(?:-(?:fast|priority))?$/u;
+
+/** `claude-opus-5-5-high-fast` -> `claude-opus-5-5`; Devin reports a family's default variant as current. */
+function devinFamily(id: string): string {
+  return id.toLowerCase().replace(DEVIN_VARIANT_SUFFIX, "");
+}
+
+/**
+ * Makes Devin run the model OpenClaw selected. `--model` is ignored on `session/load`, and an id
+ * Devin does not know is silently replaced by its default (SWE-2), so every turn sets the model
+ * through `set_config_option` and checks what Devin reports back. A different effort/fast variant of the family Devin
+ * is already on is requested too; if Devin rejects that variant id the family stays as is (warned),
+ * while a different family Devin will not switch to fails the turn.
+ */
+async function ensureDevinModel(
+  acp: DevinAcpProcess,
+  sessionId: string,
+  requested: string,
+  state: AcpModelState,
+  warn?: (message: string) => void,
+): Promise<void> {
+  const family = devinFamily(requested);
+  const sameFamily = state.current !== undefined && devinFamily(state.current) === family;
+  let lastError: unknown;
+  try {
+    const next = await acp.setModel(sessionId, requested);
+    if (next.current === undefined || devinFamily(next.current) === family) return;
+    throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${requested}`);
+  } catch (error) {
+    if (error instanceof AcpRequestError && sameFamily) {
+      warn?.(`devin-cli: Devin kept ${state.current}; it rejected ${requested} (${error.message})`);
+      return;
+    }
+    if (!(error instanceof AcpRequestError)) throw error;
+    lastError = error;
+    for (const option of state.options.filter((id) => id !== requested && devinFamily(id) === family)) {
+      try {
+        const next = await acp.setModel(sessionId, option);
+        if (next.current === undefined || devinFamily(next.current) === family) {
+          warn?.(`devin-cli: Devin rejected ${requested}; running ${next.current ?? option} instead`);
+          return;
+        }
+        throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${option}`);
+      } catch (optionError) {
+        if (!(optionError instanceof AcpRequestError)) throw optionError;
+        lastError = optionError;
+      }
+    }
+    throw new Error(
+      `devin-cli: Devin is running ${state.current ?? "an unknown model"} and would not switch to ${requested} (${String(lastError)})`,
+    );
+  }
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -150,18 +207,6 @@ function openClawToolsNote(surface: DevinToolSurface, toolNames: string[], forwa
     lines.push("Devin's built-in shell, file and web tools are disabled in this runtime; use the OpenClaw tools instead.");
   }
   return lines.join("\n");
-}
-
-function summarizeTools(tools: Iterable<ToolState>): string {
-  return [...tools]
-    .map((tool) => {
-      const status = tool.denied ? "permission denied" : (tool.status ?? "pending");
-      const tail = tool.output.trim()
-        ? `\n    ${tool.output.trim().split("\n").slice(-5).join("\n    ")}`
-        : "";
-      return `- ${tool.title || tool.name} (${status})${tail}`;
-    })
-    .join("\n");
 }
 
 function renderHistory(messages: AgentMessage[]): string {
@@ -229,11 +274,18 @@ export async function runDevinAttempt(
   let bridge: OpenClawMcpBridge | undefined;
   const forwardedServerNames = new Set<string>();
   const openClawCallIds = new Map<string, string[]>();
+  const openClawToolDefs = new Map<string, AnyAgentTool>();
+  /** OpenClaw's own tool definitions decide channel visibility; Devin's tools carry no flag. */
+  const channelProgressFlags = (tool: ToolState) =>
+    tool.openclaw && openClawToolDefs.get(tool.name)?.hideFromChannelProgress === true
+      ? { hideFromChannelProgress: true as const }
+      : {};
   const messagingSentTexts: string[] = [];
   const messagingSentMediaUrls: string[] = [];
   const messagingSentTargets: NonNullable<AgentHarnessAttemptResult["messagingToolSentTargets"]> = [];
 
   let usage: DevinUsageTracker | undefined;
+  let turnUsage: ReturnType<DevinUsageTracker["turnUsage"]> | undefined;
   let compacting = false;
   // Devin accepts `session/prompt` while a prompt is running and folds it into the active turn.
   let steerable = false;
@@ -468,7 +520,13 @@ export async function runDevinAttempt(
         await endReasoning();
         await closeLiveSegment();
         projector?.toolStart({ id, name: next.name, args });
-        const toolData = { phase: "start" as const, name: next.name, toolCallId: id, args };
+        const toolData = {
+          phase: "start" as const,
+          name: next.name,
+          toolCallId: id,
+          args,
+          ...channelProgressFlags(next),
+        };
         await emit("item", projectAgentToolActivity(toolData) as Record<string, unknown>);
         await emit("tool", toolData);
       });
@@ -496,6 +554,7 @@ export async function runDevinAttempt(
         args,
         isError,
         result: { content: [{ type: "text", text: output }] },
+        ...channelProgressFlags(tool),
       };
       await emit("tool", toolData);
       await emit(
@@ -505,11 +564,7 @@ export async function runDevinAttempt(
           status: isError ? "failed" : "completed",
         }) as Record<string, unknown>,
       );
-      const emitOutput =
-        typeof input.shouldEmitToolOutput === "function"
-          ? input.shouldEmitToolOutput()
-          : input.verboseLevel === "full";
-      if (emitOutput) await input.onToolResult?.({ text: output });
+      if (input.shouldEmitToolOutput?.()) await input.onToolResult?.({ text: output });
       await writeGroups(projector?.takeReadyGroups() ?? []);
     });
   };
@@ -623,6 +678,7 @@ export async function runDevinAttempt(
         agentId,
         ...(deps.toolSurface === "both" ? { exclude: DEVIN_OVERLAPPING_TOOLS } : {}),
       });
+      for (const tool of openClawTools) openClawToolDefs.set(tool.name, tool);
       if (openClawTools.length > 0) {
         bridge = await startOpenClawMcpBridge({
           tools: openClawTools,
@@ -696,12 +752,12 @@ export async function runDevinAttempt(
     await acp.initialize();
     assertActive();
     let resumed = false;
+    let modelState: AcpModelState | undefined;
     if (binding) {
       try {
-        await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
+        modelState = await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
         devinSessionId = binding.devinSessionId;
         resumed = true;
-        if (model) await acp.setModel(devinSessionId, model).catch(() => undefined);
       } catch (error) {
         deps.logger?.warn?.(
           `devin-cli: could not resume Devin session ${binding.devinSessionId}; starting fresh (${String(error)})`,
@@ -709,8 +765,12 @@ export async function runDevinAttempt(
       }
     }
     if (!devinSessionId) {
-      devinSessionId = await acp.newSession(cwd, mcpServers);
+      const created = await acp.newSession(cwd, mcpServers);
+      devinSessionId = created.sessionId;
+      modelState = created.model;
     }
+    assertActive();
+    if (model && modelState) await ensureDevinModel(acp, devinSessionId, model, modelState, deps.logger?.warn);
     assertActive();
     usage = new DevinUsageTracker(resumed ? binding?.contextTokens : undefined);
     deps.bindings.set(input.sessionId, {
@@ -803,36 +863,20 @@ export async function runDevinAttempt(
 
     const stopReason = result?.stopReason ?? "end_turn";
     cancelled = stopReason === "cancelled";
-    const denied = [...tools.values()].some((tool) => tool.denied);
+    turnUsage = usage.turnUsage(result?.usage);
     const finished = projector.finish({
-      stopReason: cancelled ? "aborted" : stopReason === "refusal" ? "error" : "stop",
-      usage: usage.turnUsage(result?.usage),
-      fallbackText: () => {
-        if (denied) return "Devin could not complete this turn because permission was not granted.";
-        const summary = summarizeTools(tools.values());
-        return summary
-          ? `Devin ended the turn (${stopReason}) without a text reply. Tool activity:\n${summary}`
-          : `Devin ended the turn (${stopReason}) without a text reply.`;
-      },
+      stopReason: cancelled
+        ? "aborted"
+        : stopReason === "refusal"
+          ? "error"
+          : stopReason === "max_tokens"
+            ? "length"
+            : "stop",
+      usage: turnUsage,
     });
     await writeGroups(finished.groups);
     if (finished.final) {
-      let text = finished.finalText;
-      if (stopReason === "max_tokens" || stopReason === "max_turn_requests") {
-        text = `${text}\n\n[Devin stopped early: ${stopReason}]`;
-      }
-      const message = {
-        ...finished.final.message,
-        content: finished.final.message.content.map((block) =>
-          block.type === "text" ? { ...block, text } : block,
-        ),
-      } as AssistantMessage;
-      if (!liveSegmentOpen || text !== liveText) {
-        // Tool-only turns and appended notes were never streamed.
-        if (!liveSegmentOpen) liveSegment += 1;
-        await input.onAssistantMessageStart?.();
-        await emit("assistant", { itemId: liveItemId(), text, delta: liveSegmentOpen ? "" : text });
-      }
+      const message = finished.final.message;
       assertActive();
       const written = await appendSessionTranscriptMessageByIdentityStrict({
         ...transcript,
@@ -896,7 +940,6 @@ export async function runDevinAttempt(
   }
 
   const toolCount = toolMetas.length;
-  const turnUsage = finalAssistant?.usage as ReturnType<DevinUsageTracker["turnUsage"]> | undefined;
   const attemptUsage = turnUsage
     ? {
         input: turnUsage.input,

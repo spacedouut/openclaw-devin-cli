@@ -57,16 +57,16 @@ test("parallel tools stay in one assistant message until every result arrives", 
   assert.equal(done.finalText, "between");
 });
 
-test("tool-only turns get a non-empty fallback and unresolved tools are closed", () => {
+test("tool-only turns produce no final assistant message and unresolved tools are closed", () => {
   const p = projector();
   p.toolStart({ id: "x", name: "exec", args: { command: "true" } });
-  const done = p.finish({ stopReason: "stop", usage: usageFrom(), fallbackText: () => "summary" });
+  const done = p.finish({ stopReason: "stop", usage: usageFrom() });
   assert.deepEqual(done.groups.flat().map((w) => shape(w.message)), [
     "call:x",
     "result:x:tool did not report a result",
   ]);
-  assert.equal(done.finalText, "summary");
-  assert.equal(done.final.message.content[0].text, "summary");
+  assert.equal(done.finalText, "");
+  assert.equal(done.final, undefined);
 });
 
 test("pre-tool text is keyed to its live item and every group row carries the run id", () => {

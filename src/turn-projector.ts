@@ -199,23 +199,19 @@ export class DevinTurnProjector {
 
   /**
    * Closes the turn: unresolved tools get synthetic failed results, and the
-   * trailing text becomes the final assistant message.
+   * trailing text (if Devin produced any) becomes the final assistant message.
    */
   finish(params: {
-    stopReason: "stop" | "aborted" | "error";
+    stopReason: "stop" | "length" | "aborted" | "error";
     usage: TurnUsage;
-    fallbackText?: (tools: { unresolved: number }) => string | undefined;
   }): { groups: TranscriptWrite[][]; final: TranscriptWrite | undefined; finalText: string } {
     for (const tool of this.pendingTools()) {
       this.toolEnd({ id: tool.id, name: tool.name, output: "tool did not report a result", isError: true });
     }
-    let text = this.current.text + this.deferredText;
+    const text = this.current.text + this.deferredText;
     const thinking = this.current.thinking + this.deferredThinking;
-    if (!text.trim()) {
-      text = params.fallbackText?.({ unresolved: 0 }) ?? "";
-    }
     const groups = this.takeReadyGroups();
-    if (!text) {
+    if (!text.trim()) {
       return { groups, final: undefined, finalText: "" };
     }
     this.segmentTexts.push(text);

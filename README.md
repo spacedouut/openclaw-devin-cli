@@ -25,7 +25,12 @@ Per turn the harness (`src/harness-attempt.ts`):
    `initialize` (as client `devin-cli`, with `DEVIN_PREFER_EXEC_TOOL=true`),
    then `session/load` for the Devin session bound to this OpenClaw session,
    or `session/new` for a new one (`session/set_mode`: `dangerous`→`bypass`,
-   `smart`→`smart`, `accept-edits`→`accept-edits`, `auto`→`ask`).
+   `smart`→`smart`, `accept-edits`→`accept-edits`, `auto`→`ask`). Devin ignores
+   `--model` on `session/load` and silently runs its default (SWE-2, 262k) for
+   an id it doesn't know, so the harness sets the selected model with
+   `session/set_config_option` on every turn and checks the model Devin
+   reports back (falling back to the family's listed id when Devin rejects an
+   effort variant), and fails the turn if Devin won't run it.
 2. Sends `session/prompt`. The first turn of a Devin session carries
    OpenClaw's bootstrap/system context and any earlier OpenClaw history.
 3. Mirrors Devin's ACP updates into the OpenClaw transcript as they arrive,
@@ -44,8 +49,14 @@ Per turn the harness (`src/harness-attempt.ts`):
    share Devin's tool-call id, so tool cards finish instead of staying
    "Running". A tool that never reports back gets an error result when the
    turn ends.
-4. If Devin ends a turn without any text, the final message is a summary of
-   the stop reason and tool activity, so the turn is never empty.
+4. What reaches a channel is OpenClaw's call, not the plugin's. Tool starts
+   and results go out as plain `tool`/`item` events (an OpenClaw tool's own
+   `hideFromChannelProgress` is passed along, nothing else is added), raw
+   output goes to `onToolResult` only when the host's `shouldEmitToolOutput()`
+   says so, and a turn that ends without text is returned with no assistant
+   message (`lastAssistant: undefined`) for OpenClaw to handle. Devin's tool
+   output, including the error text it writes for failed MCP calls, is passed
+   through as-is. Devin's `max_tokens` stop maps to `stopReason: "length"`.
 5. Root-agent `agent_thought_chunk` updates stream as OpenClaw reasoning
    (`onReasoningStream` / `thinking` events) and are stored as `thinking`
    blocks on the assistant message they led to. Subagent reasoning is dropped.
