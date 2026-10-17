@@ -25,7 +25,12 @@ Per turn the harness (`src/harness-attempt.ts`):
    `initialize` (as client `devin-cli`, with `DEVIN_PREFER_EXEC_TOOL=true`),
    then `session/load` for the Devin session bound to this OpenClaw session,
    or `session/new` for a new one (`session/set_mode`: `dangerous`→`bypass`,
-   `smart`→`smart`, `accept-edits`→`accept-edits`, `auto`→`ask`).
+   `smart`→`smart`, `accept-edits`→`accept-edits`, `auto`→`ask`). Devin ignores
+   `--model` on `session/load` and silently runs its default (SWE-2, 262k) for
+   an id it doesn't know, so the harness compares the model Devin reports with
+   the one OpenClaw selected, switches it with `session/set_config_option`
+   (falling back to the family's listed id when Devin rejects an effort
+   variant on a resumed session), and fails the turn if Devin won't run it.
 2. Sends `session/prompt`. The first turn of a Devin session carries
    OpenClaw's bootstrap/system context and any earlier OpenClaw history.
 3. Mirrors Devin's ACP updates into the OpenClaw transcript as they arrive,

@@ -62,7 +62,7 @@ export async function runDevinIsolatedCompletion(
   try {
     await acp.initialize();
     assertCurrent();
-    sessionId = await acp.newSession(params.workspaceDir, []);
+    sessionId = (await acp.newSession(params.workspaceDir, [])).sessionId;
     assertCurrent();
     await acp.setMode(sessionId, "ask");
     assertCurrent();

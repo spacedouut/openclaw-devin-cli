@@ -130,6 +130,24 @@ export type DevinAcpHandlers = {
   onCompaction?: (event: AcpCompactionEvent) => void;
 };
 
+type AcpSessionResponse = {
+  sessionId?: string;
+  configOptions?: { id?: string; currentValue?: unknown; options?: { value?: unknown }[] }[];
+};
+
+/** Devin's `model` config option: the id it is running and the ids `set_config_option` accepts. */
+export type AcpModelState = { current: string | undefined; options: string[] };
+
+function modelState(response: AcpSessionResponse | undefined): AcpModelState {
+  const option = response?.configOptions?.find((entry) => entry.id === "model");
+  return {
+    current: typeof option?.currentValue === "string" ? option.currentValue : undefined,
+    options: (option?.options ?? [])
+      .map((entry) => entry.value)
+      .filter((value): value is string => typeof value === "string"),
+  };
+}
+
 export class DevinAcpProcess {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<
@@ -289,8 +307,11 @@ export class DevinAcpProcess {
     });
   }
 
-  async newSession(cwd: string, mcpServers: AcpMcpServer[] = []): Promise<string> {
-    const created = await this.request<{ sessionId?: string }>("session/new", {
+  async newSession(
+    cwd: string,
+    mcpServers: AcpMcpServer[] = [],
+  ): Promise<{ sessionId: string; model: AcpModelState }> {
+    const created = await this.request<AcpSessionResponse>("session/new", {
       cwd,
       mcpServers,
       _meta: { "cognition.ai/promptForEdits": true },
@@ -298,15 +319,19 @@ export class DevinAcpProcess {
     if (!created?.sessionId) {
       throw new Error("devin acp did not return a session id");
     }
-    return created.sessionId;
+    return { sessionId: created.sessionId, model: modelState(created) };
   }
 
-  async loadSession(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = []): Promise<void> {
-    await this.request("session/load", { sessionId, cwd, mcpServers });
+  /** Resolves to the model Devin reports for the restored session (`--model` is ignored on load). */
+  async loadSession(sessionId: string, cwd: string, mcpServers: AcpMcpServer[] = []): Promise<AcpModelState> {
+    return modelState(await this.request<AcpSessionResponse>("session/load", { sessionId, cwd, mcpServers }));
   }
 
-  async setModel(sessionId: string, model: string): Promise<void> {
-    await this.request("session/set_config_option", { sessionId, configId: "model", value: model });
+  /** Resolves to the model Devin reports after the switch; Devin rejects ids it does not list. */
+  async setModel(sessionId: string, model: string): Promise<AcpModelState> {
+    return modelState(
+      await this.request<AcpSessionResponse>("session/set_config_option", { sessionId, configId: "model", value: model }),
+    );
   }
 
   async setMode(sessionId: string, modeId: string): Promise<void> {

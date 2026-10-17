@@ -38,6 +38,7 @@ import {
   DevinAcpProcess,
   pickPermissionOption,
   type AcpMcpServer,
+  type AcpModelState,
   type AcpPromptResult,
   type AcpSessionUpdate,
 } from "./devin-acp.js";
@@ -109,6 +110,45 @@ type QueueMessageOptions = Parameters<Parameters<typeof setActiveEmbeddedRun>[1]
 function isRootUpdate(update: AcpSessionUpdate): boolean {
   const parent = asRecord(update._meta?.["cognition.ai/subagent_context"]).parentAgentId;
   return typeof parent !== "string" || parent === "root";
+}
+
+const DEVIN_VARIANT_SUFFIX = /-(?:none|minimal|low|medium|high|xhigh|max)(?:-(?:fast|priority))?$/u;
+
+/** `claude-opus-5-5-high-fast` -> `claude-opus-5-5`; Devin reports a family's default variant as current. */
+function devinFamily(id: string): string {
+  return id.toLowerCase().replace(DEVIN_VARIANT_SUFFIX, "");
+}
+
+/**
+ * Makes Devin run the model OpenClaw selected. `--model` is ignored on `session/load`, and an id
+ * Devin does not know is silently replaced by its default (SWE-2), so the reported model is checked
+ * and corrected through `set_config_option`, which only accepts the ids Devin lists.
+ */
+async function ensureDevinModel(
+  acp: DevinAcpProcess,
+  sessionId: string,
+  requested: string,
+  state: AcpModelState,
+): Promise<void> {
+  if (state.current === undefined || devinFamily(state.current) === devinFamily(requested)) return;
+  const family = devinFamily(requested);
+  const candidates = [
+    requested,
+    ...state.options.filter((option) => option !== requested && devinFamily(option) === family),
+  ];
+  let lastError: unknown;
+  for (const candidate of candidates) {
+    try {
+      const next = await acp.setModel(sessionId, candidate);
+      if (next.current === undefined || devinFamily(next.current) === family) return;
+      lastError = new Error(`Devin reports ${next.current} after switching to ${candidate}`);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error(
+    `devin-cli: Devin is running ${state.current} and would not switch to ${requested} (${String(lastError)})`,
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -695,12 +735,12 @@ export async function runDevinAttempt(
     await acp.initialize();
     assertActive();
     let resumed = false;
+    let modelState: AcpModelState | undefined;
     if (binding) {
       try {
-        await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
+        modelState = await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
         devinSessionId = binding.devinSessionId;
         resumed = true;
-        if (model) await acp.setModel(devinSessionId, model).catch(() => undefined);
       } catch (error) {
         deps.logger?.warn?.(
           `devin-cli: could not resume Devin session ${binding.devinSessionId}; starting fresh (${String(error)})`,
@@ -708,8 +748,12 @@ export async function runDevinAttempt(
       }
     }
     if (!devinSessionId) {
-      devinSessionId = await acp.newSession(cwd, mcpServers);
+      const created = await acp.newSession(cwd, mcpServers);
+      devinSessionId = created.sessionId;
+      modelState = created.model;
     }
+    assertActive();
+    if (model && modelState) await ensureDevinModel(acp, devinSessionId, model, modelState);
     assertActive();
     usage = new DevinUsageTracker(resumed ? binding?.contextTokens : undefined);
     deps.bindings.set(input.sessionId, {

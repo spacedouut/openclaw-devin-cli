@@ -54,6 +54,15 @@ export function pickPermissionOption(options, allow) {
     return undefined;
 }
 export const ACP_COMPACTION_METHOD = "_cognition.ai/compaction";
+function modelState(response) {
+    const option = response?.configOptions?.find((entry) => entry.id === "model");
+    return {
+        current: typeof option?.currentValue === "string" ? option.currentValue : undefined,
+        options: (option?.options ?? [])
+            .map((entry) => entry.value)
+            .filter((value) => typeof value === "string"),
+    };
+}
 export class DevinAcpProcess {
     command;
     handlers;
@@ -211,13 +220,15 @@ export class DevinAcpProcess {
         if (!created?.sessionId) {
             throw new Error("devin acp did not return a session id");
         }
-        return created.sessionId;
+        return { sessionId: created.sessionId, model: modelState(created) };
     }
+    /** Resolves to the model Devin reports for the restored session (`--model` is ignored on load). */
     async loadSession(sessionId, cwd, mcpServers = []) {
-        await this.request("session/load", { sessionId, cwd, mcpServers });
+        return modelState(await this.request("session/load", { sessionId, cwd, mcpServers }));
     }
+    /** Resolves to the model Devin reports after the switch; Devin rejects ids it does not list. */
     async setModel(sessionId, model) {
-        await this.request("session/set_config_option", { sessionId, configId: "model", value: model });
+        return modelState(await this.request("session/set_config_option", { sessionId, configId: "model", value: model }));
     }
     async setMode(sessionId, modeId) {
         await this.request("session/set_mode", { sessionId, modeId });
