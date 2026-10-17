@@ -176,8 +176,10 @@ function buildDevinCliProvider(config: OpenClawConfig | undefined): ProviderPlug
       if (!modelId) {
         return undefined;
       }
-      const match = findFamily(config, modelId);
-      const variant = findVariant(config, modelId);
+      // A configured alias runs as its Devin target, so report that target's numbers.
+      const devinId = pluginConfig(config).modelAliases?.[modelId] ?? modelId;
+      const match = findFamily(config, devinId);
+      const variant = findVariant(config, devinId);
       // Only Devin's own numbers go out; an invented window would cap OpenClaw's
       // context projection (it keeps the smallest discovered value per model).
       const contextWindow = match?.family.contextWindow ?? variant?.max_context_tokens;
