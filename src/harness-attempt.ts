@@ -122,8 +122,8 @@ function devinFamily(id: string): string {
 
 /**
  * Makes Devin run the model OpenClaw selected. `--model` is ignored on `session/load`, and an id
- * Devin does not know is silently replaced by its default (SWE-2), so the reported model is checked
- * and corrected through `set_config_option`. A different effort/fast variant of the family Devin
+ * Devin does not know is silently replaced by its default (SWE-2), so every turn sets the model
+ * through `set_config_option` and checks what Devin reports back. A different effort/fast variant of the family Devin
  * is already on is requested too; if Devin rejects that variant id the family stays as is (warned),
  * while a different family Devin will not switch to fails the turn.
  */
@@ -134,9 +134,8 @@ async function ensureDevinModel(
   state: AcpModelState,
   warn?: (message: string) => void,
 ): Promise<void> {
-  if (state.current === undefined || state.current.toLowerCase() === requested.toLowerCase()) return;
   const family = devinFamily(requested);
-  const sameFamily = devinFamily(state.current) === family;
+  const sameFamily = state.current !== undefined && devinFamily(state.current) === family;
   let lastError: unknown;
   try {
     const next = await acp.setModel(sessionId, requested);
@@ -163,7 +162,7 @@ async function ensureDevinModel(
       }
     }
     throw new Error(
-      `devin-cli: Devin is running ${state.current} and would not switch to ${requested} (${String(lastError)})`,
+      `devin-cli: Devin is running ${state.current ?? "an unknown model"} and would not switch to ${requested} (${String(lastError)})`,
     );
   }
 }
