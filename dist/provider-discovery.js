@@ -15,7 +15,6 @@ import { deriveReasoningFamilies, mergeConfiguredFamilies, parseDevinCatalog, re
 const BACKEND_ID = "devin-cli";
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const DEFAULT_MAX_TOKENS = 128_000;
-const DEFAULT_CONTEXT_WINDOW = 262_000;
 /** Offline seed so `devin-cli` is visible in model pickers before auth.
  * Every id is a value `devin --model` accepts natively. */
 const STATIC_MODELS = [
@@ -26,7 +25,6 @@ const STATIC_MODELS = [
         reasoning: false,
         input: ["text", "image"],
         cost: ZERO_COST,
-        contextWindow: DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
     })),
 ];
@@ -77,7 +75,7 @@ function modelsFromCatalog(config, catalog) {
         reasoning: true,
         input: ["text", "image"],
         cost: ZERO_COST,
-        contextWindow: family.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        ...(family.contextWindow ? { contextWindow: family.contextWindow } : {}),
         maxTokens: family.maxTokens ?? DEFAULT_MAX_TOKENS,
     }));
     const seen = new Set(models.map((m) => m.id));
@@ -92,7 +90,7 @@ function modelsFromCatalog(config, catalog) {
             reasoning: false,
             input: ["text", "image"],
             cost: ZERO_COST,
-            contextWindow: variant?.max_context_tokens ?? DEFAULT_CONTEXT_WINDOW,
+            ...(variant?.max_context_tokens ? { contextWindow: variant.max_context_tokens } : {}),
             maxTokens: variant?.max_output_tokens ?? DEFAULT_MAX_TOKENS,
         });
     }
