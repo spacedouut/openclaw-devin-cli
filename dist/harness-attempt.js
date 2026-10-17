@@ -313,7 +313,8 @@ export async function runDevinAttempt(input, deps) {
         if (!id)
             return;
         const previous = tools.get(id);
-        const output = update.sessionUpdate === "tool_call_update" ? stripMcpToolListing(acpText(update.content)) : "";
+        const raw = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
+        const output = update.status === "failed" ? stripMcpToolListing(raw) : raw;
         const resolved = resolveDevinTool(update, forwardedServerNames);
         const name = toolNameFor(resolved, update, previous);
         const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
