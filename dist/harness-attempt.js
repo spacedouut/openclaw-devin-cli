@@ -14,7 +14,7 @@ import { ACP_MODES, acpText, DevinAcpProcess, pickPermissionOption, } from "./de
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
 import { DevinUsageTracker } from "./devin-usage.js";
-import { resolveDevinTool, stripMcpToolListing } from "./devin-tool-names.js";
+import { resolveDevinTool } from "./devin-tool-names.js";
 import { OPENCLAW_MCP_SERVER_NAME, startOpenClawMcpBridge, } from "./openclaw-mcp-server.js";
 import { buildOpenClawTools, DEVIN_OVERLAPPING_TOOLS } from "./openclaw-tools.js";
 import { DevinTurnProjector, } from "./turn-projector.js";
@@ -117,6 +117,11 @@ export async function runDevinAttempt(input, deps) {
     let bridge;
     const forwardedServerNames = new Set();
     const openClawCallIds = new Map();
+    const openClawToolDefs = new Map();
+    /** OpenClaw's own tool definitions decide channel visibility; Devin's tools carry no flag. */
+    const channelProgressFlags = (tool) => tool.openclaw && openClawToolDefs.get(tool.name)?.hideFromChannelProgress === true
+        ? { hideFromChannelProgress: true }
+        : {};
     const messagingSentTexts = [];
     const messagingSentMediaUrls = [];
     const messagingSentTargets = [];
@@ -313,8 +318,7 @@ export async function runDevinAttempt(input, deps) {
         if (!id)
             return;
         const previous = tools.get(id);
-        const raw = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
-        const output = update.status === "failed" ? stripMcpToolListing(raw) : raw;
+        const output = update.sessionUpdate === "tool_call_update" ? acpText(update.content) : "";
         const resolved = resolveDevinTool(update, forwardedServerNames);
         const name = toolNameFor(resolved, update, previous);
         const openclaw = previous?.openclaw || (!previous?.started && Boolean(resolved.openclaw));
@@ -358,7 +362,7 @@ export async function runDevinAttempt(input, deps) {
                     name: next.name,
                     toolCallId: id,
                     args,
-                    hideFromChannelProgress: true,
+                    ...channelProgressFlags(next),
                 };
                 await emit("item", projectAgentToolActivity(toolData));
                 await emit("tool", toolData);
@@ -386,13 +390,15 @@ export async function runDevinAttempt(input, deps) {
                 args,
                 isError,
                 result: { content: [{ type: "text", text: output }] },
-                hideFromChannelProgress: true,
+                ...channelProgressFlags(tool),
             };
             await emit("tool", toolData);
             await emit("item", projectAgentToolActivity({
                 ...toolData,
                 status: isError ? "failed" : "completed",
             }));
+            if (input.shouldEmitToolOutput?.())
+                await input.onToolResult?.({ text: output });
             await writeGroups(projector?.takeReadyGroups() ?? []);
         });
     };
@@ -503,6 +509,8 @@ export async function runDevinAttempt(input, deps) {
                 agentId,
                 ...(deps.toolSurface === "both" ? { exclude: DEVIN_OVERLAPPING_TOOLS } : {}),
             });
+            for (const tool of openClawTools)
+                openClawToolDefs.set(tool.name, tool);
             if (openClawTools.length > 0) {
                 bridge = await startOpenClawMcpBridge({
                     tools: openClawTools,
@@ -681,31 +689,19 @@ export async function runDevinAttempt(input, deps) {
         assertActive();
         const stopReason = result?.stopReason ?? "end_turn";
         cancelled = stopReason === "cancelled";
-        const denied = [...tools.values()].some((tool) => tool.denied);
         const finished = projector.finish({
-            stopReason: cancelled ? "aborted" : stopReason === "refusal" ? "error" : "stop",
+            stopReason: cancelled
+                ? "aborted"
+                : stopReason === "refusal"
+                    ? "error"
+                    : stopReason === "max_tokens"
+                        ? "length"
+                        : "stop",
             usage: usage.turnUsage(result?.usage),
-            fallbackText: () => denied
-                ? "Devin could not complete this turn because permission was not granted."
-                : `Devin ended the turn (${stopReason}) without a text reply.`,
         });
         await writeGroups(finished.groups);
         if (finished.final) {
-            let text = finished.finalText;
-            if (stopReason === "max_tokens" || stopReason === "max_turn_requests") {
-                text = `${text}\n\n[Devin stopped early: ${stopReason}]`;
-            }
-            const message = {
-                ...finished.final.message,
-                content: finished.final.message.content.map((block) => block.type === "text" ? { ...block, text } : block),
-            };
-            if (!liveSegmentOpen || text !== liveText) {
-                // Tool-only turns and appended notes were never streamed.
-                if (!liveSegmentOpen)
-                    liveSegment += 1;
-                await input.onAssistantMessageStart?.();
-                await emit("assistant", { itemId: liveItemId(), text, delta: liveSegmentOpen ? "" : text });
-            }
+            const message = finished.final.message;
             assertActive();
             const written = await appendSessionTranscriptMessageByIdentityStrict({
                 ...transcript,

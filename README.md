@@ -44,12 +44,14 @@ Per turn the harness (`src/harness-attempt.ts`):
    share Devin's tool-call id, so tool cards finish instead of staying
    "Running". A tool that never reports back gets an error result when the
    turn ends.
-4. If Devin ends a turn without any text, the final message just says so
-   (with the stop reason), so the turn is never empty. Tool output never goes
-   into chat: live tool events carry `hideFromChannelProgress`, so channels
-   like Discord don't post tool starts or command output, and raw results
-   aren't sent through `onToolResult`. Tool cards in the Control UI and the
-   transcript still have them.
+4. What reaches a channel is OpenClaw's call, not the plugin's. Tool starts
+   and results go out as plain `tool`/`item` events (an OpenClaw tool's own
+   `hideFromChannelProgress` is passed along, nothing else is added), raw
+   output goes to `onToolResult` only when the host's `shouldEmitToolOutput()`
+   says so, and a turn that ends without text is returned with no assistant
+   message (`lastAssistant: undefined`) for OpenClaw to handle. Devin's tool
+   output, including the error text it writes for failed MCP calls, is passed
+   through as-is. Devin's `max_tokens` stop maps to `stopReason: "length"`.
 5. Root-agent `agent_thought_chunk` updates stream as OpenClaw reasoning
    (`onReasoningStream` / `thinking` events) and are stored as `thinking`
    blocks on the assistant message they led to. Subagent reasoning is dropped.

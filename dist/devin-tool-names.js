@@ -51,8 +51,3 @@ export function resolveDevinTool(update, forwardedServers = new Set()) {
     }
     return { name: named ?? update.kind, args: raw, title: update.title, openclaw: false };
 }
-const MCP_TOOL_LISTING = /\n+Available tools on server `[^`\n]*`:\n[\s\S]*$/u;
-/** Devin appends the server's full tool list (with schemas) to failed MCP call output; drop it. */
-export function stripMcpToolListing(output) {
-    return output.replace(MCP_TOOL_LISTING, "");
-}

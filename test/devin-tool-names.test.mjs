@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveDevinTool, stripMcpToolListing } from "../dist/devin-tool-names.js";
+import { resolveDevinTool } from "../dist/devin-tool-names.js";
 
 test("reports Devin's MCP-tagged OpenClaw call as the OpenClaw tool", () => {
   const resolved = resolveDevinTool({
@@ -105,13 +105,3 @@ test("OpenClaw calls still translate when servers are forwarded; unknown servers
   assert.equal(unknown.mcpServer, undefined);
 });
 
-test("strips the tool listing Devin appends to failed MCP calls", () => {
-  const failed =
-    "MCP tool 'echoo' returned an error: [\n  {\n    \"type\": \"text\",\n    \"text\": \"Unknown OpenClaw tool: echoo\"\n  }\n]\n\n" +
-    "Available tools on server `openclaw`:\n[\n  {\n    \"name\": \"echo\",\n    \"inputSchema\": {\"type\": \"object\"}\n  }\n]";
-  assert.equal(
-    stripMcpToolListing(failed),
-    "MCP tool 'echoo' returned an error: [\n  {\n    \"type\": \"text\",\n    \"text\": \"Unknown OpenClaw tool: echoo\"\n  }\n]",
-  );
-  assert.equal(stripMcpToolListing("total 0\nfile.txt"), "total 0\nfile.txt");
-});
