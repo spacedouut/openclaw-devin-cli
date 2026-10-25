@@ -2,11 +2,13 @@
  * Devin CLI agent harness: claims `devin-cli/<model>` routes and runs each
  * turn natively through `devin acp`, owning the OpenClaw transcript mirror.
  */
-import type {
-  AgentHarnessResetParams,
-  AgentHarnessSessionDeletionParams,
-  AgentHarnessSessionDeletionMutation,
-  AgentHarnessV2,
+import {
+  AgentHarnessPreflightError,
+  type AgentHarnessAttemptParamsV2,
+  type AgentHarnessResetParams,
+  type AgentHarnessSessionDeletionParams,
+  type AgentHarnessSessionDeletionMutation,
+  type AgentHarnessV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { compactDevinSession } from "./compaction.js";
 import { fetchDevinUsageForContext } from "./devin-quota.js";
@@ -15,6 +17,19 @@ import { runDevinIsolatedCompletion, type IsolatedCompletionParams } from "./iso
 import { DevinSessionBindings } from "./session-bindings.js";
 
 export const HARNESS_ID = "devin-cli";
+
+/**
+ * Exact tool policy holds only in `openclaw` tool mode: Devin's built-in tools
+ * are off and every tool comes from OpenClaw's own policy-filtered surface.
+ */
+export function assertToolPolicyEnforceable(input: AgentHarnessAttemptParamsV2, toolSurface: DevinToolSurface): void {
+  if (toolSurface === "openclaw") return;
+  if (!input.pluginHarnessToolPolicyRestricted && !input.disableTools) return;
+  const message =
+    `Devin CLI keeps its own tools in tools: "${toolSurface}" mode and cannot enforce this chat's tool restrictions. ` +
+    `Set the devin-cli plugin's tools option to "openclaw" or update the tool settings.`;
+  throw new AgentHarnessPreflightError(message, { scope: "harness", userMessage: message });
+}
 
 export function createDevinHarness(params: {
   providerId: string;
@@ -36,6 +51,7 @@ export function createDevinHarness(params: {
     autoSelection: { providerIds: [params.providerId] },
     authBootstrap: "harness",
     executionEnvironment: "host-only",
+    conversationToolPolicySupport: "exact",
     supports: ({ provider, requestedRuntime, modelProvider }) => {
       if (requestedRuntime !== HARNESS_ID && requestedRuntime !== "auto") {
         return { supported: false, reason: "Devin CLI runs only on its own runtime" };
@@ -54,18 +70,21 @@ export function createDevinHarness(params: {
       }
       return { supported: true, priority: 100 };
     },
-    runAttempt: (input) =>
-      runDevinAttempt(input, {
+    runAttempt: (input) => {
+      const toolSurface = params.resolveToolSurface(input);
+      assertToolPolicyEnforceable(input, toolSurface);
+      return runDevinAttempt(input, {
         harnessId: HARNESS_ID,
         command: params.command(),
         stateDir: params.stateDir(),
-        toolSurface: params.resolveToolSurface(input),
+        toolSurface,
         bindings: store(),
         generationSignal: generation.signal,
         resolveModel: params.resolveModel,
         resolvePermissionMode: params.resolvePermissionMode,
         logger: params.logger,
-      }),
+      });
+    },
     runIsolatedCompletionV2: (input) =>
       runDevinIsolatedCompletion(input, {
         command: params.command(),

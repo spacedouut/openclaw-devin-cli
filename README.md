@@ -153,6 +153,11 @@ guarded by a random bearer token, passed to `devin acp` in `session/new` /
   `web_fetch`) are left out of the MCP server.
 - `devin`: no `openclaw` MCP server; Devin's built-in tools only.
 
+Chats with tool restrictions (tool profiles, `tools.allow`/`deny`, group or
+sender policies, `disableTools`) only run in `openclaw` mode, since that's the
+one mode where OpenClaw decides every tool Devin can call. In `both` or `devin`
+mode those turns fail with an error saying so.
+
 ## OpenClaw's configured MCP servers
 
 MCP servers configured in OpenClaw (`mcp.servers` and plugin-bundled servers)
