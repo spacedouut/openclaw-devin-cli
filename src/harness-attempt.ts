@@ -30,6 +30,7 @@ import {
   appendSessionTranscriptMessageByIdentityStrict,
   appendSessionTranscriptMessagesByIdentity,
   publishSessionTranscriptUpdateByIdentity,
+  type TranscriptMessageAppendResult,
 } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { randomUUID } from "node:crypto";
 import {
@@ -443,10 +444,33 @@ export async function runDevinAttempt(
     });
   };
 
+  // Tells the gateway which live assistant items a committed row now owns, so
+  // they leave its run buffer and are not replayed in the terminal reply.
+  const publishCommitted = async (
+    result: TranscriptMessageAppendResult<unknown> | undefined,
+    itemIds: string[] | undefined,
+  ) => {
+    const position = result?.anchor?.activeMessagePosition;
+    await publishSessionTranscriptUpdateByIdentity({
+      ...transcript,
+      ...(result && itemIds?.length
+        ? {
+            update: {
+              message: result.message,
+              messageId: result.messageId,
+              ...(typeof position === "number" ? { messageSeq: position + 1 } : {}),
+              runId: input.runId,
+              assistantItemIds: itemIds,
+            },
+          }
+        : {}),
+    });
+  };
+
   const writeGroups = async (groups: TranscriptWrite[][]) => {
     for (const group of groups) {
       assertActive();
-      await appendSessionTranscriptMessagesByIdentity({
+      const results = await appendSessionTranscriptMessagesByIdentity({
         ...transcript,
         config: input.config,
         cwd: input.workspaceDir,
@@ -456,7 +480,8 @@ export async function runDevinAttempt(
           beforeFreshMessageCommit: () => input.hostCapabilities.assertActive(),
         })),
       });
-      await publishSessionTranscriptUpdateByIdentity(transcript).catch(() => undefined);
+      const committed = group.findIndex((write) => write.itemIds?.length);
+      await publishCommitted(results[committed], group[committed]?.itemIds).catch(() => undefined);
     }
   };
 
@@ -882,7 +907,7 @@ export async function runDevinAttempt(
         ...transcript,
         config: input.config,
         runId: input.runId,
-        updateMode: "inline",
+        updateMode: finished.final.itemIds ? "none" : "inline",
         message: { ...message, idempotencyKey: finished.final.key },
         prepareMessageAfterIdempotencyCheck: (candidate) => {
           input.hostCapabilities.assertActive();
@@ -895,6 +920,9 @@ export async function runDevinAttempt(
       finalAssistant = written.result.message as AssistantMessage;
       finalKey = finished.final.key;
       terminalAnchor = written.result.anchor;
+      if (finished.final.itemIds) {
+        await publishCommitted(written.result, finished.final.itemIds).catch(() => undefined);
+      }
     }
     assistantTexts = finished.finalText ? [finalAssistantText(finalAssistant) ?? finished.finalText] : [];
     messages = (

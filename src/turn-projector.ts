@@ -11,7 +11,12 @@ import type { AgentMessage } from "openclaw/plugin-sdk/agent-harness-runtime";
 
 export type AssistantMessage = Extract<AgentMessage, { role: "assistant" }>;
 export type ToolResultMessage = Extract<AgentMessage, { role: "toolResult" }>;
-export type TranscriptWrite = { key: string; message: AssistantMessage | ToolResultMessage };
+/** `itemIds` lists the live assistant items an assistant row commits. */
+export type TranscriptWrite = {
+  key: string;
+  message: AssistantMessage | ToolResultMessage;
+  itemIds?: string[];
+};
 
 export type ModelRef = { provider: string; model: string; api: string };
 
@@ -20,6 +25,7 @@ type Segment = {
   thinking: string;
   text: string;
   itemId?: string;
+  itemIds: string[];
   startedAt?: number;
   tools: ToolCall[];
   results: Map<string, ToolResultMessage>;
@@ -66,6 +72,7 @@ export class DevinTurnProjector {
   private deferredThinking = "";
   private deferredText = "";
   private deferredItemId: string | undefined;
+  private deferredItemIds: string[] = [];
   private deferredStartedAt: number | undefined;
   private readonly ready: TranscriptWrite[][] = [];
   private groupSeq = 0;
@@ -93,10 +100,12 @@ export class DevinTurnProjector {
     if (this.current.tools.length > 0) {
       this.deferredText += delta;
       this.deferredItemId ??= itemId;
+      if (itemId && !this.deferredItemIds.includes(itemId)) this.deferredItemIds.push(itemId);
       this.deferredStartedAt ??= this.now();
     } else {
       this.current.text += delta;
       this.current.itemId ??= itemId;
+      if (itemId && !this.current.itemIds.includes(itemId)) this.current.itemIds.push(itemId);
       this.current.startedAt ??= this.now();
     }
   }
@@ -169,7 +178,11 @@ export class DevinTurnProjector {
       usage: usageFrom(),
     } as AssistantMessage;
     this.ready.push([
-      { key: `${keyPrefix}:devin:group:${seq}:assistant`, message: this.withRun(assistant) },
+      {
+        key: `${keyPrefix}:devin:group:${seq}:assistant`,
+        message: this.withRun(assistant),
+        ...(segment.itemIds.length > 0 ? { itemIds: [...segment.itemIds] } : {}),
+      },
       ...segment.tools.map((tool) => ({
         key: `${keyPrefix}:devin:tool:${tool.id}`,
         message: this.withRun(segment.results.get(tool.id)!),
@@ -180,10 +193,12 @@ export class DevinTurnProjector {
       this.deferredItemId,
       this.deferredStartedAt,
       this.deferredThinking,
+      this.deferredItemIds,
     );
     this.deferredThinking = "";
     this.deferredText = "";
     this.deferredItemId = undefined;
+    this.deferredItemIds = [];
     this.deferredStartedAt = undefined;
   }
 
@@ -226,7 +241,12 @@ export class DevinTurnProjector {
       timestamp: this.now(),
       usage: params.usage,
     } as AssistantMessage;
-    return { groups, final: { key: `${keyPrefix}:devin:final`, message }, finalText: text };
+    const itemIds = [...new Set([...this.current.itemIds, ...this.deferredItemIds])];
+    return {
+      groups,
+      final: { key: `${keyPrefix}:devin:final`, message, ...(itemIds.length > 0 ? { itemIds } : {}) },
+      finalText: text,
+    };
   }
 
   texts(): string[] {
@@ -234,11 +254,18 @@ export class DevinTurnProjector {
   }
 }
 
-function newSegment(text = "", itemId?: string, startedAt?: number, thinking = ""): Segment {
+function newSegment(
+  text = "",
+  itemId?: string,
+  startedAt?: number,
+  thinking = "",
+  itemIds: string[] = [],
+): Segment {
   return {
     thinking,
     text,
     ...(itemId ? { itemId } : {}),
+    itemIds: [...itemIds],
     ...(startedAt !== undefined ? { startedAt } : {}),
     tools: [],
     results: new Map(),

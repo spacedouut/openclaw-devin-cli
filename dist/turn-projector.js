@@ -28,6 +28,7 @@ export class DevinTurnProjector {
     deferredThinking = "";
     deferredText = "";
     deferredItemId;
+    deferredItemIds = [];
     deferredStartedAt;
     ready = [];
     groupSeq = 0;
@@ -48,11 +49,15 @@ export class DevinTurnProjector {
         if (this.current.tools.length > 0) {
             this.deferredText += delta;
             this.deferredItemId ??= itemId;
+            if (itemId && !this.deferredItemIds.includes(itemId))
+                this.deferredItemIds.push(itemId);
             this.deferredStartedAt ??= this.now();
         }
         else {
             this.current.text += delta;
             this.current.itemId ??= itemId;
+            if (itemId && !this.current.itemIds.includes(itemId))
+                this.current.itemIds.push(itemId);
             this.current.startedAt ??= this.now();
         }
     }
@@ -125,16 +130,21 @@ export class DevinTurnProjector {
             usage: usageFrom(),
         };
         this.ready.push([
-            { key: `${keyPrefix}:devin:group:${seq}:assistant`, message: this.withRun(assistant) },
+            {
+                key: `${keyPrefix}:devin:group:${seq}:assistant`,
+                message: this.withRun(assistant),
+                ...(segment.itemIds.length > 0 ? { itemIds: [...segment.itemIds] } : {}),
+            },
             ...segment.tools.map((tool) => ({
                 key: `${keyPrefix}:devin:tool:${tool.id}`,
                 message: this.withRun(segment.results.get(tool.id)),
             })),
         ]);
-        this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt, this.deferredThinking);
+        this.current = newSegment(this.deferredText, this.deferredItemId, this.deferredStartedAt, this.deferredThinking, this.deferredItemIds);
         this.deferredThinking = "";
         this.deferredText = "";
         this.deferredItemId = undefined;
+        this.deferredItemIds = [];
         this.deferredStartedAt = undefined;
     }
     /** Completed assistant/tool-result groups not yet handed to the writer. */
@@ -171,17 +181,23 @@ export class DevinTurnProjector {
             timestamp: this.now(),
             usage: params.usage,
         };
-        return { groups, final: { key: `${keyPrefix}:devin:final`, message }, finalText: text };
+        const itemIds = [...new Set([...this.current.itemIds, ...this.deferredItemIds])];
+        return {
+            groups,
+            final: { key: `${keyPrefix}:devin:final`, message, ...(itemIds.length > 0 ? { itemIds } : {}) },
+            finalText: text,
+        };
     }
     texts() {
         return [...this.segmentTexts];
     }
 }
-function newSegment(text = "", itemId, startedAt, thinking = "") {
+function newSegment(text = "", itemId, startedAt, thinking = "", itemIds = []) {
     return {
         thinking,
         text,
         ...(itemId ? { itemId } : {}),
+        itemIds: [...itemIds],
         ...(startedAt !== undefined ? { startedAt } : {}),
         tools: [],
         results: new Map(),
