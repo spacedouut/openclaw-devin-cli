@@ -128,3 +128,20 @@ test("persists reasoning as thinking blocks ahead of the text and tools it led t
   ]);
   assert.equal(done.finalText, "Kernel 7.0.");
 });
+
+test("assistant rows list every live item they commit", () => {
+  const p = new DevinTurnProjector({ modelRef, keyPrefix: "req", runId: "run-1", now: () => 1 });
+  p.text("Checking.", "run-1:devin-text:1");
+  p.toolStart({ id: "t1", name: "exec", args: {} });
+  p.text("Next.", "run-1:devin-text:2");
+  p.toolStart({ id: "t2", name: "exec", args: {} });
+  p.text(" More.", "run-1:devin-text:3");
+  p.toolEnd({ id: "t1", name: "exec", output: "ok", isError: false });
+  p.toolEnd({ id: "t2", name: "exec", output: "ok", isError: false });
+  const [group] = p.takeReadyGroups();
+  assert.deepEqual(group.map((w) => w.itemIds), [["run-1:devin-text:1"], undefined, undefined]);
+  p.text("Done.", "run-1:devin-text:4");
+  const done = p.finish({ stopReason: "stop", usage: usageFrom() });
+  assert.equal(done.finalText, "Next. More.Done.");
+  assert.deepEqual(done.final.itemIds, ["run-1:devin-text:2", "run-1:devin-text:3", "run-1:devin-text:4"]);
+});

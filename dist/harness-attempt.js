@@ -329,10 +329,29 @@ export async function runDevinAttempt(input, deps) {
                 input.hostCapabilities.reportOutputTokens?.(recorded.outputTokens);
         });
     };
+    // Tells the gateway which live assistant items a committed row now owns, so
+    // they leave its run buffer and are not replayed in the terminal reply.
+    const publishCommitted = async (result, itemIds) => {
+        const position = result?.anchor?.activeMessagePosition;
+        await publishSessionTranscriptUpdateByIdentity({
+            ...transcript,
+            ...(result && itemIds?.length
+                ? {
+                    update: {
+                        message: result.message,
+                        messageId: result.messageId,
+                        ...(typeof position === "number" ? { messageSeq: position + 1 } : {}),
+                        runId: input.runId,
+                        assistantItemIds: itemIds,
+                    },
+                }
+                : {}),
+        });
+    };
     const writeGroups = async (groups) => {
         for (const group of groups) {
             assertActive();
-            await appendSessionTranscriptMessagesByIdentity({
+            const results = await appendSessionTranscriptMessagesByIdentity({
                 ...transcript,
                 config: input.config,
                 cwd: input.workspaceDir,
@@ -342,7 +361,8 @@ export async function runDevinAttempt(input, deps) {
                     beforeFreshMessageCommit: () => input.hostCapabilities.assertActive(),
                 })),
             });
-            await publishSessionTranscriptUpdateByIdentity(transcript).catch(() => undefined);
+            const committed = group.findIndex((write) => write.itemIds?.length);
+            await publishCommitted(results[committed], group[committed]?.itemIds).catch(() => undefined);
         }
     };
     const onText = (delta) => {
@@ -761,7 +781,7 @@ export async function runDevinAttempt(input, deps) {
                 ...transcript,
                 config: input.config,
                 runId: input.runId,
-                updateMode: "inline",
+                updateMode: finished.final.itemIds ? "none" : "inline",
                 message: { ...message, idempotencyKey: finished.final.key },
                 prepareMessageAfterIdempotencyCheck: (candidate) => {
                     input.hostCapabilities.assertActive();
@@ -774,6 +794,9 @@ export async function runDevinAttempt(input, deps) {
             finalAssistant = written.result.message;
             finalKey = finished.final.key;
             terminalAnchor = written.result.anchor;
+            if (finished.final.itemIds) {
+                await publishCommitted(written.result, finished.final.itemIds).catch(() => undefined);
+            }
         }
         assistantTexts = finished.finalText ? [finalAssistantText(finalAssistant) ?? finished.finalText] : [];
         messages = (await SessionManager.openModelContextAsync(transcript, {
