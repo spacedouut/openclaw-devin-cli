@@ -19,6 +19,10 @@ const PROVIDER_ID = "devin-cli";
 function pluginConfig(config) {
     return (resolvePluginConfigObject(config, PROVIDER_ID) ?? {});
 }
+function keepAliveMs(config) {
+    const seconds = pluginConfig(config).keepAliveSeconds;
+    return typeof seconds === "number" && seconds >= 0 ? seconds * 1000 : undefined;
+}
 /** Full-exec OpenClaw runs get Devin's "approve everything" mode; other runs
  * default to `smart`, which auto-runs actions a fast model judges safe. */
 function resolvePermissionMode(config, agentId) {
@@ -161,6 +165,7 @@ export default definePluginEntry({
             resolvePermissionMode: (input) => resolvePermissionMode(input.config, input.agentId),
             resolveToolSurface: (input) => pluginConfig(input.config).tools ?? "openclaw",
             resolveIsolatedModel: (input) => resolveDevinModel({ config: input.config, modelId: input.modelId, thinkLevel: input.thinkLevel }),
+            keepAliveMs: () => keepAliveMs(api.config),
             logger: api.logger,
         }));
     },

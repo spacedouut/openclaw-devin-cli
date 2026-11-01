@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { ACP_MODES, AcpRequestError, acpText, DevinAcpProcess, pickPermissionOption, } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
+import { closeWarmSession } from "./warm-sessions.js";
 import { DevinUsageTracker } from "./devin-usage.js";
 import { resolveDevinTool } from "./devin-tool-names.js";
 import { OPENCLAW_MCP_SERVER_NAME, startOpenClawMcpBridge, } from "./openclaw-mcp-server.js";
@@ -43,13 +44,13 @@ async function ensureDevinModel(acp, sessionId, requested, state, warn) {
     try {
         const next = await acp.setModel(sessionId, requested);
         if (next.current === undefined || devinFamily(next.current) === family)
-            return;
+            return next;
         throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${requested}`);
     }
     catch (error) {
         if (error instanceof AcpRequestError && sameFamily) {
             warn?.(`devin-cli: Devin kept ${state.current}; it rejected ${requested} (${error.message})`);
-            return;
+            return state;
         }
         if (!(error instanceof AcpRequestError))
             throw error;
@@ -59,7 +60,7 @@ async function ensureDevinModel(acp, sessionId, requested, state, warn) {
                 const next = await acp.setModel(sessionId, option);
                 if (next.current === undefined || devinFamily(next.current) === family) {
                     warn?.(`devin-cli: Devin rejected ${requested}; running ${next.current ?? option} instead`);
-                    return;
+                    return next;
                 }
                 throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${option}`);
             }
@@ -163,6 +164,8 @@ export async function runDevinAttempt(input, deps) {
     const tools = new Map();
     const toolMetas = [];
     let bridge;
+    let warmShape;
+    let warmModel;
     const forwardedServerNames = new Set();
     const openClawCallIds = new Map();
     const openClawToolDefs = new Map();
@@ -573,35 +576,32 @@ export async function runDevinAttempt(input, deps) {
         projector = new DevinTurnProjector({ modelRef, keyPrefix: requestId, runId: input.runId });
         const cwd = input.workspaceDir;
         const mcpServers = [];
+        let openClawTools = [];
         if (deps.toolSurface !== "devin") {
-            const openClawTools = buildOpenClawTools(input, {
+            openClawTools = buildOpenClawTools(input, {
                 agentId,
                 ...(deps.toolSurface === "both" ? { exclude: DEVIN_OVERLAPPING_TOOLS } : {}),
             });
             for (const tool of openClawTools)
                 openClawToolDefs.set(tool.name, tool);
-            if (openClawTools.length > 0) {
-                bridge = await startOpenClawMcpBridge({
-                    tools: openClawTools,
-                    signal,
-                    claimToolCallId,
-                    onCompleted: onOpenClawToolCompleted,
-                });
-                mcpServers.push(bridge.server);
-            }
-            assertActive();
         }
         const forwarded = await resolveForwardedMcpServers(input, agentId);
         assertActive();
         for (const skipped of forwarded.skipped) {
             deps.logger?.warn?.(`devin-cli: MCP server "${skipped.configName}" not given to Devin: ${skipped.reason}`);
         }
-        for (const { server } of forwarded.servers) {
-            mcpServers.push(server);
+        for (const { server } of forwarded.servers)
             forwardedServerNames.add(server.name);
-        }
         const configPath = deps.toolSurface === "openclaw" ? writeOpenClawOnlyDevinConfig({ stateDir: deps.stateDir }) : undefined;
-        acp = new DevinAcpProcess(deps.command, { cwd, model, configPath }, {
+        const bridgeParams = { tools: openClawTools, signal, claimToolCallId, onCompleted: onOpenClawToolCompleted };
+        // Devin reads tools and config when the session loads, so a warm process only fits an identical setup.
+        const shape = JSON.stringify({
+            cwd,
+            configPath,
+            tools: openClawTools.map((tool) => tool.name),
+            forwarded: forwarded.servers.map(({ server }) => server),
+        });
+        const handlers = {
             onUpdate: (sessionId, update) => {
                 if (!started || sessionId !== devinSessionId || signal.aborted)
                     return;
@@ -645,34 +645,65 @@ export async function runDevinAttempt(input, deps) {
                     ? { outcome: { outcome: "selected", optionId: option.optionId } }
                     : { outcome: { outcome: "cancelled" } };
             },
-        });
+        };
+        let warm = deps.warm.take(input.sessionId);
+        if (warm && (warm.shape !== shape || warm.devinSessionId !== binding?.devinSessionId)) {
+            await closeWarmSession(warm);
+            warm = undefined;
+        }
+        let resumed = false;
+        let modelState;
+        if (warm) {
+            acp = warm.acp;
+            acp.rebind(handlers);
+            bridge = warm.bridge;
+            bridge?.rebind(bridgeParams);
+            devinSessionId = warm.devinSessionId;
+            modelState = warm.model;
+            resumed = true;
+        }
+        else {
+            if (openClawTools.length > 0) {
+                bridge = await startOpenClawMcpBridge(bridgeParams);
+                mcpServers.push(bridge.server);
+                assertActive();
+            }
+            for (const { server } of forwarded.servers)
+                mcpServers.push(server);
+            acp = new DevinAcpProcess(deps.command, { cwd, model, configPath }, handlers);
+        }
         const onAbort = () => {
             if (devinSessionId)
                 acp?.cancel(devinSessionId);
         };
         signal.addEventListener("abort", onAbort, { once: true });
-        await acp.initialize();
-        assertActive();
-        let resumed = false;
-        let modelState;
-        if (binding) {
-            try {
-                modelState = await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
-                devinSessionId = binding.devinSessionId;
-                resumed = true;
+        if (!warm) {
+            await acp.initialize();
+            assertActive();
+            if (binding) {
+                try {
+                    modelState = await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
+                    devinSessionId = binding.devinSessionId;
+                    resumed = true;
+                }
+                catch (error) {
+                    deps.logger?.warn?.(`devin-cli: could not resume Devin session ${binding.devinSessionId}; starting fresh (${String(error)})`);
+                }
             }
-            catch (error) {
-                deps.logger?.warn?.(`devin-cli: could not resume Devin session ${binding.devinSessionId}; starting fresh (${String(error)})`);
+            if (!devinSessionId) {
+                const created = await acp.newSession(cwd, mcpServers);
+                devinSessionId = created.sessionId;
+                modelState = created.model;
             }
         }
-        if (!devinSessionId) {
-            const created = await acp.newSession(cwd, mcpServers);
-            devinSessionId = created.sessionId;
-            modelState = created.model;
-        }
         assertActive();
-        if (model && modelState)
-            await ensureDevinModel(acp, devinSessionId, model, modelState, deps.logger?.warn);
+        if (!devinSessionId)
+            throw new Error("devin-cli: Devin returned no session id");
+        if (model && modelState) {
+            modelState = await ensureDevinModel(acp, devinSessionId, model, modelState, deps.logger?.warn);
+        }
+        warmShape = shape;
+        warmModel = modelState;
         assertActive();
         usage = new DevinUsageTracker(resumed ? binding?.contextTokens : undefined);
         deps.bindings.set(input.sessionId, {
@@ -832,8 +863,14 @@ export async function runDevinAttempt(input, deps) {
         steerable = false;
         compacting = false;
         clearTimeout(timer);
-        await acp?.close(devinSessionId).catch(() => undefined);
-        await bridge?.close().catch(() => undefined);
+        const reusable = !failure && !chainError && !timedOut && !cancelled && !signal.aborted;
+        if (acp && devinSessionId && warmShape && warmModel && reusable) {
+            await deps.warm.put(input.sessionId, { acp, bridge, devinSessionId, shape: warmShape, model: warmModel });
+        }
+        else {
+            await acp?.close(devinSessionId).catch(() => undefined);
+            await bridge?.close().catch(() => undefined);
+        }
         if (activeRegistered) {
             clearActiveEmbeddedRun(input.sessionId, activeRun, sessionKey, input.sessionFile);
         }
