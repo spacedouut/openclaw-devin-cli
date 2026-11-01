@@ -163,7 +163,7 @@ export class DevinAcpProcess {
   constructor(
     readonly command: string,
     params: { cwd: string; model?: string; configPath?: string; env?: NodeJS.ProcessEnv },
-    private readonly handlers: DevinAcpHandlers,
+    private handlers: DevinAcpHandlers,
   ) {
     const args = [
       ...(params.configPath ? ["--config", params.configPath] : []),
@@ -197,6 +197,16 @@ export class DevinAcpProcess {
       for (const { reject } of this.pending.values()) reject(error);
       this.pending.clear();
     });
+  }
+
+  get running(): boolean {
+    return !this.closed;
+  }
+
+  /** Points a kept-alive process at the next turn's handlers. */
+  rebind(handlers: DevinAcpHandlers): void {
+    this.handlers = handlers;
+    this.stderr = "";
   }
 
   stderrErrors(): string {

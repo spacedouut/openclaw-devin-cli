@@ -36,9 +36,19 @@ export type OpenClawToolCompletion = {
   startedAt: number;
 };
 
+type OpenClawMcpBridgeParams = {
+  tools: AnyAgentTool[];
+  signal: AbortSignal;
+  /** Returns the id to execute a call under (e.g. the matching ACP tool call id). */
+  claimToolCallId: (toolName: string) => string;
+  onCompleted?: (completion: OpenClawToolCompletion) => Promise<void> | void;
+};
+
 export type OpenClawMcpBridge = {
   server: AcpMcpServer;
   toolNames: string[];
+  /** Serves the next turn's tools from the same endpoint. */
+  rebind: (params: OpenClawMcpBridgeParams) => void;
   close: () => Promise<void>;
 };
 
@@ -86,20 +96,19 @@ function tokenMatches(header: string | undefined, expected: Buffer): boolean {
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
-export async function startOpenClawMcpBridge(params: {
-  tools: AnyAgentTool[];
-  signal: AbortSignal;
-  /** Returns the id to execute a call under (e.g. the matching ACP tool call id). */
-  claimToolCallId: (toolName: string) => string;
-  onCompleted?: (completion: OpenClawToolCompletion) => Promise<void> | void;
-}): Promise<OpenClawMcpBridge> {
-  const byName = new Map(params.tools.map((tool) => [tool.name, tool]));
-  const listed = params.tools.map((tool) => ({
+function listTools(tools: AnyAgentTool[]) {
+  return tools.map((tool) => ({
     name: tool.name,
     ...(tool.label && tool.label !== tool.name ? { title: tool.label } : {}),
     description: tool.description ?? "",
     inputSchema: inputSchemaFor(tool),
   }));
+}
+
+export async function startOpenClawMcpBridge(initial: OpenClawMcpBridgeParams): Promise<OpenClawMcpBridge> {
+  let params = initial;
+  let byName = new Map(params.tools.map((tool) => [tool.name, tool]));
+  let listed = listTools(params.tools);
 
   let barrier: Promise<unknown> = Promise.resolve();
   const pending = new Set<Promise<unknown>>();
@@ -121,22 +130,23 @@ export async function startOpenClawMcpBridge(params: {
     if (!tool) {
       return { isError: true, content: [{ type: "text", text: `Unknown OpenClaw tool: ${name}` }] };
     }
-    const toolCallId = params.claimToolCallId(name);
+    const { signal, claimToolCallId, onCompleted } = params;
+    const toolCallId = claimToolCallId(name);
     const args = asRecord(rawArgs);
     return await schedule(tool.executionMode, async () => {
       const startedAt = Date.now();
-      params.signal.throwIfAborted();
+      signal.throwIfAborted();
       try {
         const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
-        const raw = await tool.execute(toolCallId, prepared, params.signal);
+        const raw = await tool.execute(toolCallId, prepared, signal);
         const result = sanitizeToolResult(raw);
         const isError = isToolResultError(result);
-        await params.onCompleted?.({ tool, toolCallId, args, result: raw, isError, startedAt });
+        await onCompleted?.({ tool, toolCallId, args, result: raw, isError, startedAt });
         return { content: toMcpContent(result), ...(isError ? { isError: true } : {}) };
       } catch (error) {
         const message =
           extractToolErrorMessage(error) ?? (error instanceof Error ? error.message : String(error));
-        await params.onCompleted?.({ tool, toolCallId, args, error: message, isError: true, startedAt });
+        await onCompleted?.({ tool, toolCallId, args, error: message, isError: true, startedAt });
         return { isError: true, content: [{ type: "text", text: message }] };
       }
     });
@@ -193,7 +203,7 @@ export async function startOpenClawMcpBridge(params: {
   const { port } = http.address() as AddressInfo;
 
   let closed: Promise<void> | undefined;
-  return {
+  const bridge: OpenClawMcpBridge = {
     server: {
       type: "http",
       name: OPENCLAW_MCP_SERVER_NAME,
@@ -201,10 +211,17 @@ export async function startOpenClawMcpBridge(params: {
       headers: [{ name: "Authorization", value: `Bearer ${token}` }],
     },
     toolNames: params.tools.map((tool) => tool.name),
+    rebind: (next) => {
+      params = next;
+      byName = new Map(next.tools.map((tool) => [tool.name, tool]));
+      listed = listTools(next.tools);
+      bridge.toolNames = next.tools.map((tool) => tool.name);
+    },
     close: () =>
       (closed ??= new Promise<void>((resolve) => {
         http.close(() => resolve());
         http.closeAllConnections();
       })),
   };
+  return bridge;
 }

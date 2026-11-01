@@ -53,14 +53,18 @@ function tokenMatches(header, expected) {
     const given = Buffer.from(header.slice("Bearer ".length));
     return given.length === expected.length && timingSafeEqual(given, expected);
 }
-export async function startOpenClawMcpBridge(params) {
-    const byName = new Map(params.tools.map((tool) => [tool.name, tool]));
-    const listed = params.tools.map((tool) => ({
+function listTools(tools) {
+    return tools.map((tool) => ({
         name: tool.name,
         ...(tool.label && tool.label !== tool.name ? { title: tool.label } : {}),
         description: tool.description ?? "",
         inputSchema: inputSchemaFor(tool),
     }));
+}
+export async function startOpenClawMcpBridge(initial) {
+    let params = initial;
+    let byName = new Map(params.tools.map((tool) => [tool.name, tool]));
+    let listed = listTools(params.tools);
     let barrier = Promise.resolve();
     const pending = new Set();
     const schedule = (mode, run) => {
@@ -80,22 +84,23 @@ export async function startOpenClawMcpBridge(params) {
         if (!tool) {
             return { isError: true, content: [{ type: "text", text: `Unknown OpenClaw tool: ${name}` }] };
         }
-        const toolCallId = params.claimToolCallId(name);
+        const { signal, claimToolCallId, onCompleted } = params;
+        const toolCallId = claimToolCallId(name);
         const args = asRecord(rawArgs);
         return await schedule(tool.executionMode, async () => {
             const startedAt = Date.now();
-            params.signal.throwIfAborted();
+            signal.throwIfAborted();
             try {
                 const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
-                const raw = await tool.execute(toolCallId, prepared, params.signal);
+                const raw = await tool.execute(toolCallId, prepared, signal);
                 const result = sanitizeToolResult(raw);
                 const isError = isToolResultError(result);
-                await params.onCompleted?.({ tool, toolCallId, args, result: raw, isError, startedAt });
+                await onCompleted?.({ tool, toolCallId, args, result: raw, isError, startedAt });
                 return { content: toMcpContent(result), ...(isError ? { isError: true } : {}) };
             }
             catch (error) {
                 const message = extractToolErrorMessage(error) ?? (error instanceof Error ? error.message : String(error));
-                await params.onCompleted?.({ tool, toolCallId, args, error: message, isError: true, startedAt });
+                await onCompleted?.({ tool, toolCallId, args, error: message, isError: true, startedAt });
                 return { isError: true, content: [{ type: "text", text: message }] };
             }
         });
@@ -145,7 +150,7 @@ export async function startOpenClawMcpBridge(params) {
     });
     const { port } = http.address();
     let closed;
-    return {
+    const bridge = {
         server: {
             type: "http",
             name: OPENCLAW_MCP_SERVER_NAME,
@@ -153,9 +158,16 @@ export async function startOpenClawMcpBridge(params) {
             headers: [{ name: "Authorization", value: `Bearer ${token}` }],
         },
         toolNames: params.tools.map((tool) => tool.name),
+        rebind: (next) => {
+            params = next;
+            byName = new Map(next.tools.map((tool) => [tool.name, tool]));
+            listed = listTools(next.tools);
+            bridge.toolNames = next.tools.map((tool) => tool.name);
+        },
         close: () => (closed ??= new Promise((resolve) => {
             http.close(() => resolve());
             http.closeAllConnections();
         })),
     };
+    return bridge;
 }
