@@ -120,6 +120,7 @@ openclaw plugins enable devin-cli --accept-capabilities
           // "modelAliases": { "max": "swe-2-max" } // custom short ids -> devin --model ids
           // "autoReasoningFamilies": true, // one model per family; thinking level picks the variant
           // "reasoningFamilies": { ... }   // explicit family -> level -> variant maps (see below)
+          // "keepAliveSeconds": 120        // keep devin acp up between turns, 0 = off
         }
       }
     }
@@ -133,6 +134,12 @@ plugin mirrors OpenClaw's own exec policy: a `full` exec mode grants Devin
 auto-runs actions a fast model judges safe. Permission prompts Devin still
 raises are auto-approved by the harness, except in `auto` (ACP `ask`, read-only),
 where they are rejected.
+
+After a turn finishes, its `devin acp` process stays up for `keepAliveSeconds`
+(default 120). If the next turn in that session has the same workspace, tools
+and MCP servers, it reuses the process and skips startup and `session/load`,
+which saves a few hundred ms before the first token. Each idle process uses
+about 125MB. Set it to 0 to start a fresh process every turn.
 
 ## OpenClaw tools
 

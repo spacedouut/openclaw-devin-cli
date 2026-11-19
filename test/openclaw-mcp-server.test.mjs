@@ -157,3 +157,25 @@ test("OpenClaw-only Devin config keeps user settings and disables native tools",
   for (const name of DEVIN_NATIVE_TOOLS) assert.ok(config.disabled_tools.includes(name));
   assert.ok(!config.disabled_tools.some((name) => name.startsWith("mcp_")));
 });
+
+test("rebind serves the next turn's tools and callbacks on the same endpoint", async () => {
+  const first = [];
+  const second = [];
+  const bridge = await startOpenClawMcpBridge({
+    tools: [echoTool(first)],
+    signal: new AbortController().signal,
+    claimToolCallId: () => "turn-1",
+  });
+  try {
+    const client = await connect(bridge);
+    await client.callTool({ name: "echo", arguments: { text: "a" } });
+    bridge.rebind({ tools: [echoTool(second)], signal: new AbortController().signal, claimToolCallId: () => "turn-2" });
+    await client.callTool({ name: "echo", arguments: { text: "b" } });
+    assert.deepEqual(first, [{ toolCallId: "turn-1", args: { text: "a" } }]);
+    assert.deepEqual(second, [{ toolCallId: "turn-2", args: { text: "b" } }]);
+    assert.deepEqual(bridge.toolNames, ["echo"]);
+    await client.close();
+  } finally {
+    await bridge.close();
+  }
+});

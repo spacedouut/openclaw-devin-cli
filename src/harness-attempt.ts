@@ -43,9 +43,11 @@ import {
   type AcpModelState,
   type AcpPromptResult,
   type AcpSessionUpdate,
+  type DevinAcpHandlers,
 } from "./devin-acp.js";
 import { writeOpenClawOnlyDevinConfig } from "./devin-config.js";
 import { resolveForwardedMcpServers } from "./forwarded-mcp-servers.js";
+import { closeWarmSession, type WarmDevinSessions } from "./warm-sessions.js";
 import { DevinUsageTracker, type DevinUsageRecord } from "./devin-usage.js";
 import { resolveDevinTool, type DevinToolIdentity } from "./devin-tool-names.js";
 import {
@@ -76,6 +78,8 @@ export type DevinAttemptDeps = {
   stateDir: string;
   toolSurface: DevinToolSurface;
   bindings: DevinSessionBindings;
+  /** Finished turns park their `devin acp` here for the session's next turn. */
+  warm: WarmDevinSessions;
   generationSignal: AbortSignal;
   /** Resolves the `devin --model` id for the requested OpenClaw model + thinking level. */
   resolveModel: (input: AgentHarnessAttemptParamsV2) => string | undefined;
@@ -134,18 +138,18 @@ async function ensureDevinModel(
   requested: string,
   state: AcpModelState,
   warn?: (message: string) => void,
-): Promise<void> {
+): Promise<AcpModelState> {
   const family = devinFamily(requested);
   const sameFamily = state.current !== undefined && devinFamily(state.current) === family;
   let lastError: unknown;
   try {
     const next = await acp.setModel(sessionId, requested);
-    if (next.current === undefined || devinFamily(next.current) === family) return;
+    if (next.current === undefined || devinFamily(next.current) === family) return next;
     throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${requested}`);
   } catch (error) {
     if (error instanceof AcpRequestError && sameFamily) {
       warn?.(`devin-cli: Devin kept ${state.current}; it rejected ${requested} (${error.message})`);
-      return;
+      return state;
     }
     if (!(error instanceof AcpRequestError)) throw error;
     lastError = error;
@@ -154,7 +158,7 @@ async function ensureDevinModel(
         const next = await acp.setModel(sessionId, option);
         if (next.current === undefined || devinFamily(next.current) === family) {
           warn?.(`devin-cli: Devin rejected ${requested}; running ${next.current ?? option} instead`);
-          return;
+          return next;
         }
         throw new Error(`devin-cli: Devin reports ${next.current} after switching to ${option}`);
       } catch (optionError) {
@@ -273,6 +277,8 @@ export async function runDevinAttempt(
   const tools = new Map<string, ToolState>();
   const toolMetas: AgentHarnessAttemptResult["toolMetas"] = [];
   let bridge: OpenClawMcpBridge | undefined;
+  let warmShape: string | undefined;
+  let warmModel: AcpModelState | undefined;
   const forwardedServerNames = new Set<string>();
   const openClawCallIds = new Map<string, string[]>();
   const openClawToolDefs = new Map<string, AnyAgentTool>();
@@ -698,104 +704,126 @@ export async function runDevinAttempt(
 
     const cwd = input.workspaceDir;
     const mcpServers: AcpMcpServer[] = [];
+    let openClawTools: AnyAgentTool[] = [];
     if (deps.toolSurface !== "devin") {
-      const openClawTools = buildOpenClawTools(input, {
+      openClawTools = buildOpenClawTools(input, {
         agentId,
         ...(deps.toolSurface === "both" ? { exclude: DEVIN_OVERLAPPING_TOOLS } : {}),
       });
       for (const tool of openClawTools) openClawToolDefs.set(tool.name, tool);
-      if (openClawTools.length > 0) {
-        bridge = await startOpenClawMcpBridge({
-          tools: openClawTools,
-          signal,
-          claimToolCallId,
-          onCompleted: onOpenClawToolCompleted,
-        });
-        mcpServers.push(bridge.server);
-      }
-      assertActive();
     }
     const forwarded = await resolveForwardedMcpServers(input, agentId);
     assertActive();
     for (const skipped of forwarded.skipped) {
       deps.logger?.warn?.(`devin-cli: MCP server "${skipped.configName}" not given to Devin: ${skipped.reason}`);
     }
-    for (const { server } of forwarded.servers) {
-      mcpServers.push(server);
-      forwardedServerNames.add(server.name);
-    }
+    for (const { server } of forwarded.servers) forwardedServerNames.add(server.name);
     const configPath =
       deps.toolSurface === "openclaw" ? writeOpenClawOnlyDevinConfig({ stateDir: deps.stateDir }) : undefined;
-    acp = new DevinAcpProcess(
-      deps.command,
-      { cwd, model, configPath },
-      {
-        onUpdate: (sessionId, update) => {
-          if (!started || sessionId !== devinSessionId || signal.aborted) return;
-          switch (update.sessionUpdate) {
-            case "agent_message_chunk":
-              if (isRootUpdate(update)) onText(acpText(update.content));
-              break;
-            case "agent_thought_chunk":
-              if (isRootUpdate(update)) onThinking(acpText(update.content));
-              break;
-            case "usage_update":
-              if (isRootUpdate(update)) onUsage(update);
-              break;
-            case "tool_call":
-            case "tool_call_update":
-              onToolUpdate(update);
-              break;
-            default:
-              break;
-          }
-        },
-        onPermission: async (request) => {
-          input.hostCapabilities.assertActive();
-          const id = request.toolCall?.toolCallId;
-          if (id && tools.get(id)?.openclaw) {
-            const option = pickPermissionOption(request.options, true);
-            if (option) return { outcome: { outcome: "selected", optionId: option.optionId } };
-          }
-          if (id && !allowPermissions) {
-            const tool = tools.get(id);
-            if (tool) tool.denied = true;
-            releaseToolCallId(id);
-          }
-          const option = pickPermissionOption(request.options, allowPermissions);
-          return option
-            ? { outcome: { outcome: "selected", optionId: option.optionId } }
-            : { outcome: { outcome: "cancelled" } };
-        },
+    const bridgeParams = { tools: openClawTools, signal, claimToolCallId, onCompleted: onOpenClawToolCompleted };
+    // Devin reads tools and config when the session loads, so a warm process only fits an identical setup.
+    const shape = JSON.stringify({
+      cwd,
+      configPath,
+      tools: openClawTools.map((tool) => tool.name),
+      forwarded: forwarded.servers.map(({ server }) => server),
+    });
+    const handlers: DevinAcpHandlers = {
+      onUpdate: (sessionId, update) => {
+        if (!started || sessionId !== devinSessionId || signal.aborted) return;
+        switch (update.sessionUpdate) {
+          case "agent_message_chunk":
+            if (isRootUpdate(update)) onText(acpText(update.content));
+            break;
+          case "agent_thought_chunk":
+            if (isRootUpdate(update)) onThinking(acpText(update.content));
+            break;
+          case "usage_update":
+            if (isRootUpdate(update)) onUsage(update);
+            break;
+          case "tool_call":
+          case "tool_call_update":
+            onToolUpdate(update);
+            break;
+          default:
+            break;
+        }
       },
-    );
+      onPermission: async (request) => {
+        input.hostCapabilities.assertActive();
+        const id = request.toolCall?.toolCallId;
+        if (id && tools.get(id)?.openclaw) {
+          const option = pickPermissionOption(request.options, true);
+          if (option) return { outcome: { outcome: "selected", optionId: option.optionId } };
+        }
+        if (id && !allowPermissions) {
+          const tool = tools.get(id);
+          if (tool) tool.denied = true;
+          releaseToolCallId(id);
+        }
+        const option = pickPermissionOption(request.options, allowPermissions);
+        return option
+          ? { outcome: { outcome: "selected", optionId: option.optionId } }
+          : { outcome: { outcome: "cancelled" } };
+      },
+    };
+
+    let warm = deps.warm.take(input.sessionId);
+    if (warm && (warm.shape !== shape || warm.devinSessionId !== binding?.devinSessionId)) {
+      await closeWarmSession(warm);
+      warm = undefined;
+    }
+    let resumed = false;
+    let modelState: AcpModelState | undefined;
+    if (warm) {
+      acp = warm.acp;
+      acp.rebind(handlers);
+      bridge = warm.bridge;
+      bridge?.rebind(bridgeParams);
+      devinSessionId = warm.devinSessionId;
+      modelState = warm.model;
+      resumed = true;
+    } else {
+      if (openClawTools.length > 0) {
+        bridge = await startOpenClawMcpBridge(bridgeParams);
+        mcpServers.push(bridge.server);
+        assertActive();
+      }
+      for (const { server } of forwarded.servers) mcpServers.push(server);
+      acp = new DevinAcpProcess(deps.command, { cwd, model, configPath }, handlers);
+    }
     const onAbort = () => {
       if (devinSessionId) acp?.cancel(devinSessionId);
     };
     signal.addEventListener("abort", onAbort, { once: true });
 
-    await acp.initialize();
-    assertActive();
-    let resumed = false;
-    let modelState: AcpModelState | undefined;
-    if (binding) {
-      try {
-        modelState = await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
-        devinSessionId = binding.devinSessionId;
-        resumed = true;
-      } catch (error) {
-        deps.logger?.warn?.(
-          `devin-cli: could not resume Devin session ${binding.devinSessionId}; starting fresh (${String(error)})`,
-        );
+    if (!warm) {
+      await acp.initialize();
+      assertActive();
+      if (binding) {
+        try {
+          modelState = await acp.loadSession(binding.devinSessionId, cwd, mcpServers);
+          devinSessionId = binding.devinSessionId;
+          resumed = true;
+        } catch (error) {
+          deps.logger?.warn?.(
+            `devin-cli: could not resume Devin session ${binding.devinSessionId}; starting fresh (${String(error)})`,
+          );
+        }
+      }
+      if (!devinSessionId) {
+        const created = await acp.newSession(cwd, mcpServers);
+        devinSessionId = created.sessionId;
+        modelState = created.model;
       }
     }
-    if (!devinSessionId) {
-      const created = await acp.newSession(cwd, mcpServers);
-      devinSessionId = created.sessionId;
-      modelState = created.model;
-    }
     assertActive();
-    if (model && modelState) await ensureDevinModel(acp, devinSessionId, model, modelState, deps.logger?.warn);
+    if (!devinSessionId) throw new Error("devin-cli: Devin returned no session id");
+    if (model && modelState) {
+      modelState = await ensureDevinModel(acp, devinSessionId, model, modelState, deps.logger?.warn);
+    }
+    warmShape = shape;
+    warmModel = modelState;
     assertActive();
     usage = new DevinUsageTracker(resumed ? binding?.contextTokens : undefined);
     deps.bindings.set(input.sessionId, {
@@ -960,8 +988,13 @@ export async function runDevinAttempt(
     steerable = false;
     compacting = false;
     clearTimeout(timer);
-    await acp?.close(devinSessionId).catch(() => undefined);
-    await bridge?.close().catch(() => undefined);
+    const reusable = !failure && !chainError && !timedOut && !cancelled && !signal.aborted;
+    if (acp && devinSessionId && warmShape && warmModel && reusable) {
+      await deps.warm.put(input.sessionId, { acp, bridge, devinSessionId, shape: warmShape, model: warmModel });
+    } else {
+      await acp?.close(devinSessionId).catch(() => undefined);
+      await bridge?.close().catch(() => undefined);
+    }
     if (activeRegistered) {
       clearActiveEmbeddedRun(input.sessionId, activeRun, sessionKey, input.sessionFile);
     }

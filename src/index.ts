@@ -56,10 +56,17 @@ type DevinCliPluginConfig = {
   autoReasoningFamilies?: boolean;
   /** OpenClaw model id -> thinking level -> `devin --model` id. */
   reasoningFamilies?: Record<string, ReasoningFamilyConfig>;
+  /** Seconds a finished turn's `devin acp` stays up for the next turn (default 120, 0 = off). */
+  keepAliveSeconds?: number;
 };
 
 function pluginConfig(config: OpenClawConfig | undefined): DevinCliPluginConfig {
   return (resolvePluginConfigObject(config, PROVIDER_ID) ?? {}) as DevinCliPluginConfig;
+}
+
+function keepAliveMs(config: OpenClawConfig | undefined): number | undefined {
+  const seconds = pluginConfig(config).keepAliveSeconds;
+  return typeof seconds === "number" && seconds >= 0 ? seconds * 1000 : undefined;
 }
 
 /** Full-exec OpenClaw runs get Devin's "approve everything" mode; other runs
@@ -218,6 +225,7 @@ export default definePluginEntry({
         resolveToolSurface: (input) => pluginConfig(input.config).tools ?? "openclaw",
         resolveIsolatedModel: (input) =>
           resolveDevinModel({ config: input.config, modelId: input.modelId, thinkLevel: input.thinkLevel }),
+        keepAliveMs: () => keepAliveMs(api.config),
         logger: api.logger,
       }),
     );

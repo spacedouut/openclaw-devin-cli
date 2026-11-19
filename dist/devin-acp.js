@@ -109,6 +109,14 @@ export class DevinAcpProcess {
             this.pending.clear();
         });
     }
+    get running() {
+        return !this.closed;
+    }
+    /** Points a kept-alive process at the next turn's handlers. */
+    rebind(handlers) {
+        this.handlers = handlers;
+        this.stderr = "";
+    }
     stderrErrors() {
         return this.stderr
             .split("\n")

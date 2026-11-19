@@ -8,7 +8,9 @@ import { fetchDevinUsageForContext } from "./devin-quota.js";
 import { runDevinAttempt } from "./harness-attempt.js";
 import { runDevinIsolatedCompletion } from "./isolated-completion.js";
 import { DevinSessionBindings } from "./session-bindings.js";
+import { WarmDevinSessions } from "./warm-sessions.js";
 export const HARNESS_ID = "devin-cli";
+const DEFAULT_KEEP_ALIVE_MS = 120_000;
 /**
  * Exact tool policy holds only in `openclaw` tool mode: Devin's built-in tools
  * are off and every tool comes from OpenClaw's own policy-filtered surface.
@@ -26,6 +28,7 @@ export function createDevinHarness(params) {
     const generation = new AbortController();
     let bindings;
     const store = () => (bindings ??= new DevinSessionBindings(params.stateDir()));
+    const warm = new WarmDevinSessions(() => params.keepAliveMs?.() ?? DEFAULT_KEEP_ALIVE_MS);
     return {
         id: HARNESS_ID,
         label: "Devin CLI",
@@ -60,6 +63,7 @@ export function createDevinHarness(params) {
                 stateDir: params.stateDir(),
                 toolSurface,
                 bindings: store(),
+                warm,
                 generationSignal: generation.signal,
                 resolveModel: params.resolveModel,
                 resolvePermissionMode: params.resolvePermissionMode,
@@ -71,14 +75,19 @@ export function createDevinHarness(params) {
             stateDir: params.stateDir(),
             model: params.resolveIsolatedModel(input),
         }),
-        compact: (input) => compactDevinSession(input, {
-            command: params.command(),
-            stateDir: params.stateDir(),
-            bindings: store(),
-        }),
-        reset: (input) => {
-            if (input.sessionId)
-                store().delete(input.sessionId);
+        compact: async (input) => {
+            await warm.evict(input.sessionId);
+            return await compactDevinSession(input, {
+                command: params.command(),
+                stateDir: params.stateDir(),
+                bindings: store(),
+            });
+        },
+        reset: async (input) => {
+            if (!input.sessionId)
+                return;
+            store().delete(input.sessionId);
+            await warm.evict(input.sessionId);
         },
         withSessionDeletion: async (input, run) => {
             input.assertCurrent();
@@ -86,6 +95,7 @@ export function createDevinHarness(params) {
             return await run({
                 commit: () => {
                     store().delete(input.sessionId);
+                    void warm.evict(input.sessionId);
                 },
                 rollback: () => {
                     if (previous)
@@ -96,8 +106,9 @@ export function createDevinHarness(params) {
         // Same quota as the provider hook (which stays authoritative), for usage
         // lookups that resolve through the runtime instead of the provider.
         fetchUsageSnapshot: fetchDevinUsageForContext,
-        dispose: () => {
+        dispose: async () => {
             generation.abort();
+            await warm.closeAll();
         },
     };
 }
